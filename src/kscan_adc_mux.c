@@ -109,6 +109,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
 
 #define GPIO_SPEC_ENTRY(node, prop, idx)    GPIO_DT_SPEC_GET_BY_IDX(node, prop, idx),
 #define ADC_DT_SPEC_ENTRY(node, prop, idx)  ADC_DT_SPEC_GET_BY_IDX(node, idx),
+#define U8_PROP_BY_IDX(node, prop, idx)     DT_PROP_BY_IDX(node, prop, idx),
 
 #define KSCAN_ADC_MUX_INST(n)                                                   \
                                                                                 \
@@ -123,7 +124,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     };                                                                          \
                                                                                 \
     /* MUX map: flat array [addr*num_adc + adc_idx] → key_index */             \
-    static const uint8_t he_mux_map_##n[] = DT_INST_PROP(n, mux_map);          \
+    static const uint8_t he_mux_map_##n[] = {                                  \
+        DT_FOREACH_PROP_ELEM(DT_DRV_INST(n), mux_map, U8_PROP_BY_IDX)          \
+    };                                                                          \
                                                                                 \
     /* Driver configuration (read-only, from devicetree) */                    \
     struct he_kscan_cfg_##n {                                                   \
