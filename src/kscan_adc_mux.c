@@ -67,6 +67,7 @@ static const uint8_t distance_lut[DISTANCE_LUT_SIZE] = {
 #define INST_NUM_ADC(n)     DT_INST_PROP_LEN(n, io_channels)
 #define INST_NUM_ADDR(n)    (1u << INST_NUM_SELECT(n))
 #define INST_NUM_KEYS(n)    DT_INST_PROP(n, num_keys)
+#define INST_NUM_MUX_MAP(n) DT_INST_PROP_LEN(n, mux_map)
 
 /* -----------------------------------------------------------------------
  * Shared helper functions (not per-instance)
@@ -109,7 +110,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
 
 #define GPIO_SPEC_ENTRY(node, prop, idx)    GPIO_DT_SPEC_GET_BY_IDX(node, prop, idx),
 #define ADC_DT_SPEC_ENTRY(node, prop, idx)  ADC_DT_SPEC_GET_BY_IDX(node, idx),
-#define U8_PROP_BY_IDX(node, prop, idx)     DT_PROP_BY_IDX(node, prop, idx),
+#define MUX_MAP_ELEM(idx, inst)             DT_INST_PROP_BY_IDX(inst, mux_map, idx)
 
 #define KSCAN_ADC_MUX_INST(n)                                                   \
                                                                                 \
@@ -125,7 +126,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
     /* MUX map: flat array [addr*num_adc + adc_idx] → key_index */             \
     static const uint8_t he_mux_map_##n[] = {                                  \
-        DT_FOREACH_PROP_ELEM(DT_DRV_INST(n), mux_map, U8_PROP_BY_IDX)          \
+        LISTIFY(INST_NUM_MUX_MAP(n), MUX_MAP_ELEM, (,), n)                     \
     };                                                                          \
                                                                                 \
     /* Driver configuration (read-only, from devicetree) */                    \
