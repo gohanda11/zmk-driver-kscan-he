@@ -271,17 +271,11 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         const struct he_kscan_cfg_##n *cfg = dev->config;                       \
         struct adc_sequence seq = { 0 };                                        \
                                                                                 \
-        /* Seed all keys with a safe initial rest value.                */      \
-        /* invert_adc=true → rest is at low ADC (key not pressed)       */      \
-        /* We start at ADC_MAX_VALUE/2 and converge downward.           */      \
-        const uint16_t init_rest   = ADC_MAX_VALUE / 2u;                        \
-        const uint16_t init_bottom = init_rest + 650u;                          \
-                                                                                \
-        for (uint8_t k = 0; k < cfg->num_keys; k++) {                          \
-            data->keys[k].adc_filtered = init_rest;                             \
-            data->keys[k].adc_rest     = init_rest;                             \
-            data->keys[k].adc_bottom   = (init_bottom > ADC_MAX_VALUE)          \
-                                         ? ADC_MAX_VALUE : init_bottom;         \
+        /* Initial state: all zeros. We will pick up first readings. */         \
+        for (uint8_t k = 0; k < cfg->num_keys; k++) {                           \
+            data->keys[k].adc_filtered = 0;                                     \
+            data->keys[k].adc_rest     = 0;                                     \
+            data->keys[k].adc_bottom   = 0;                                     \
             data->keys[k].distance     = 0;                                     \
             data->keys[k].pressed      = false;                                 \
         }                                                                       \
@@ -314,31 +308,25 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                     }                                                           \
                                                                                 \
                     struct he_key_state *ks = &data->keys[key_idx];             \
-                    ks->adc_filtered = EMA(adc_val, ks->adc_filtered);          \
-                                                                                \
-                    /* Drive rest downward: converge to stable minimum */       \
-                    if (ks->adc_filtered + CALIBRATION_EPSILON <=               \
-                        ks->adc_rest) {                                         \
+                    if (ks->adc_rest == 0) {                                    \
+                        ks->adc_filtered = adc_val;                             \
+                        ks->adc_rest     = adc_val;                             \
+                    } else {                                                    \
+                        ks->adc_filtered = EMA(adc_val, ks->adc_filtered);      \
+                        /* Follow the signal during calibration window */       \
                         ks->adc_rest = ks->adc_filtered;                        \
                     }                                                           \
                                                                                 \
-                    /* Ensure bottom stays above rest by at least 650 */        \
-                    uint16_t min_bottom = ks->adc_rest + 650u;                  \
-                    if (min_bottom > ADC_MAX_VALUE) {                           \
-                        min_bottom = ADC_MAX_VALUE;                             \
-                    }                                                           \
-                    if (ks->adc_bottom < min_bottom) {                          \
-                        ks->adc_bottom = min_bottom;                            \
+                    ks->adc_bottom = ks->adc_rest + 650u;                       \
+                    if (ks->adc_bottom > ADC_MAX_VALUE) {                       \
+                        ks->adc_bottom = ADC_MAX_VALUE;                         \
                     }                                                           \
                 }                                                               \
             }                                                                   \
         }                                                                       \
                                                                                 \
-        LOG_INF("HE20 calibration done."                                        \
-                " key[0] rest=%u bottom=%u"                                     \
-                " key[21] rest=%u bottom=%u",                                   \
-                data->keys[0].adc_rest,  data->keys[0].adc_bottom,             \
-                data->keys[21].adc_rest, data->keys[21].adc_bottom);            \
+        LOG_INF("HE20 calibration done. key[0] rest=%u key[21] rest=%u",         \
+                data->keys[0].adc_rest, data->keys[21].adc_rest);               \
     }                                                                           \
                                                                                 \
     /* --------------------------------------------------------------- */       \
