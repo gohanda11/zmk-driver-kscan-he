@@ -25,7 +25,7 @@ properties:
       ADC channels connected to each MUX common output (COM/X).
       One entry per multiplexer.
 
-  mux-map:
+  mux_map:
     type: array
     required: true
     description: |

@@ -123,20 +123,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     };                                                                          \
                                                                                 \
     /* MUX map: flat array [addr*num_adc + adc_idx] → key_index */             \
-    static const uint8_t he_mux_map_##n[] = {                                  \
-        DT_INST_PROP_BY_IDX(n, mux_map, 0),  DT_INST_PROP_BY_IDX(n, mux_map, 1),  \
-        DT_INST_PROP_BY_IDX(n, mux_map, 2),  DT_INST_PROP_BY_IDX(n, mux_map, 3),  \
-        DT_INST_PROP_BY_IDX(n, mux_map, 4),  DT_INST_PROP_BY_IDX(n, mux_map, 5),  \
-        DT_INST_PROP_BY_IDX(n, mux_map, 6),  DT_INST_PROP_BY_IDX(n, mux_map, 7),  \
-        DT_INST_PROP_BY_IDX(n, mux_map, 8),  DT_INST_PROP_BY_IDX(n, mux_map, 9),  \
-        DT_INST_PROP_BY_IDX(n, mux_map, 10), DT_INST_PROP_BY_IDX(n, mux_map, 11), \
-        DT_INST_PROP_BY_IDX(n, mux_map, 12), DT_INST_PROP_BY_IDX(n, mux_map, 13), \
-        DT_INST_PROP_BY_IDX(n, mux_map, 14), DT_INST_PROP_BY_IDX(n, mux_map, 15), \
-        DT_INST_PROP_BY_IDX(n, mux_map, 16), DT_INST_PROP_BY_IDX(n, mux_map, 17), \
-        DT_INST_PROP_BY_IDX(n, mux_map, 18), DT_INST_PROP_BY_IDX(n, mux_map, 19), \
-        DT_INST_PROP_BY_IDX(n, mux_map, 20), DT_INST_PROP_BY_IDX(n, mux_map, 21), \
-        DT_INST_PROP_BY_IDX(n, mux_map, 22), DT_INST_PROP_BY_IDX(n, mux_map, 23), \
-    };                                                                          \
+    static const uint8_t he_mux_map_##n[] = DT_INST_PROP(n, mux_map);          \
                                                                                 \
     /* Driver configuration (read-only, from devicetree) */                    \
     struct he_kscan_cfg_##n {                                                   \
