@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+
+DT_COMPAT_ZMK_KSCAN_ADC_MUX := zmk,kscan-adc-mux
+
+config ZMK_KSCAN_ADC_MUX
+    bool "Hall Effect ADC MUX kscan driver"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_KSCAN_ADC_MUX))
+    select ADC
+    select GPIO
+    help
+      Enable the Hall Effect keyboard scanner driver using
+      SN74LV4051A analog multiplexers and SAADC.
+      Reads GH39FKSW Hall Effect sensor values and converts
+      to ZMK key press/release events.
