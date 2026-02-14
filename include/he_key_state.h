@@ -27,6 +27,8 @@
 struct he_key_state {
     /* EMA-filtered ADC value */
     uint16_t adc_filtered;
+    /* Previous EMA-filtered ADC value (for movement detection) */
+    uint16_t adc_prev_filtered;
     /* ADC value when key is fully released (rest position) */
     uint16_t adc_rest;
     /* ADC value at maximum travel (bottom-out), updated during scan */

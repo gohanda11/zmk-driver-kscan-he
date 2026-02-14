@@ -135,6 +135,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         uint8_t  num_addr;                                                      \
         uint8_t  num_keys;                                                      \
         uint16_t scan_period_ms;                                                \
+        uint16_t idle_scan_period_ms;                                           \
+        uint16_t idle_enter_ms;                                                 \
+        uint8_t  idle_wakeup_delta;                                             \
         uint16_t settle_us;                                                     \
         bool     invert_adc;                                                    \
         uint8_t  press_threshold;                                               \
@@ -151,6 +154,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         .num_addr              = INST_NUM_ADDR(n),                              \
         .num_keys              = INST_NUM_KEYS(n),                              \
         .scan_period_ms        = DT_INST_PROP(n, scan_period_ms),               \
+        .idle_scan_period_ms   = DT_INST_PROP_OR(n, idle_scan_period_ms, 12),   \
+        .idle_enter_ms         = DT_INST_PROP_OR(n, idle_enter_ms, 120),        \
+        .idle_wakeup_delta     = DT_INST_PROP_OR(n, idle_wakeup_delta, 4),      \
         .settle_us             = DT_INST_PROP(n, settle_us),                    \
         .invert_adc            = DT_INST_PROP(n, invert_adc),                   \
         .press_threshold       = DT_INST_PROP(n, press_threshold),              \
@@ -165,6 +171,8 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         struct k_work_delayable scan_work;                                      \
         struct he_key_state  keys[INST_NUM_KEYS(n)];                            \
         int16_t              adc_buf[INST_NUM_ADC(n)];                          \
+        int64_t              last_activity_ms;                                  \
+        bool                 idle_mode;                                         \
     };                                                                          \
                                                                                 \
     static struct he_kscan_data_##n he_data_##n;
@@ -185,6 +193,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             CONTAINER_OF(dwork, struct he_kscan_data_##n, scan_work);           \
         const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
         struct adc_sequence seq = { 0 };                                        \
+        bool scan_has_activity = false;                                         \
                                                                                 \
         for (uint8_t addr = 0; addr < cfg->num_addr; addr++) {                  \
             /* 1. Drive MUX address */                                          \
@@ -222,7 +231,16 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
                 /* 5. EMA filter */                                             \
                 struct he_key_state *ks = &data->keys[key_idx];                 \
+                uint16_t prev_filtered = ks->adc_filtered;                      \
                 ks->adc_filtered = EMA(adc_val, ks->adc_filtered);              \
+                ks->adc_prev_filtered = prev_filtered;                          \
+
+                uint16_t adc_delta = (ks->adc_filtered >= prev_filtered)        \
+                    ? (uint16_t)(ks->adc_filtered - prev_filtered)              \
+                    : (uint16_t)(prev_filtered - ks->adc_filtered);             \
+                if (adc_delta >= cfg->idle_wakeup_delta) {                      \
+                    scan_has_activity = true;                                   \
+                }                                                               \
                                                                                 \
                 /* 6. Track bottom-out (max travel) */                          \
                 if (ks->adc_filtered >=                                         \
@@ -251,14 +269,27 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                             key_idx,                                            \
                             ks->pressed ? "press" : "release",                 \
                             ks->distance);                                      \
+                    scan_has_activity = true;                                   \
                     data->callback(data->dev, 0, key_idx, ks->pressed);         \
                 }                                                               \
             }                                                                   \
         }                                                                       \
                                                                                 \
+        int64_t now = k_uptime_get();                                           \
+        if (scan_has_activity) {                                                \
+            data->last_activity_ms = now;                                       \
+            data->idle_mode = false;                                            \
+        } else if (!data->idle_mode &&                                          \
+                   (now - data->last_activity_ms) >= cfg->idle_enter_ms) {      \
+            data->idle_mode = true;                                             \
+        }                                                                       \
+
+        uint16_t next_period_ms = data->idle_mode                               \
+            ? cfg->idle_scan_period_ms                                          \
+            : cfg->scan_period_ms;                                              \
+
         /* Schedule next scan */                                                \
-        k_work_reschedule(&data->scan_work,                                     \
-                  K_MSEC(cfg->scan_period_ms));                         \
+        k_work_reschedule(&data->scan_work, K_MSEC(next_period_ms));            \
     }                                                                           \
                                                                                 \
     /* --------------------------------------------------------------- */       \
@@ -274,6 +305,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         /* Initial state: all zeros. We will pick up first readings. */         \
         for (uint8_t k = 0; k < cfg->num_keys; k++) {                           \
             data->keys[k].adc_filtered = 0;                                     \
+            data->keys[k].adc_prev_filtered = 0;                                \
             data->keys[k].adc_rest     = 0;                                     \
             data->keys[k].adc_bottom   = 0;                                     \
             data->keys[k].distance     = 0;                                     \
@@ -310,8 +342,10 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                     struct he_key_state *ks = &data->keys[key_idx];             \
                     if (ks->adc_rest == 0) {                                    \
                         ks->adc_filtered = adc_val;                             \
+                        ks->adc_prev_filtered = adc_val;                        \
                         ks->adc_rest     = adc_val;                             \
                     } else {                                                    \
+                        ks->adc_prev_filtered = ks->adc_filtered;               \
                         ks->adc_filtered = EMA(adc_val, ks->adc_filtered);      \
                         /* Follow the signal during calibration window */       \
                         ks->adc_rest = ks->adc_filtered;                        \
@@ -348,6 +382,8 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     {                                                                           \
         struct he_kscan_data_##n *data = dev->data;                             \
         const struct he_kscan_cfg_##n *cfg = dev->config;                       \
+        data->last_activity_ms = k_uptime_get();                                \
+        data->idle_mode = false;                                                \
         k_work_reschedule(&data->scan_work, K_MSEC(cfg->scan_period_ms));       \
         return 0;                                                               \
     }                                                                           \
@@ -402,6 +438,14 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         /* Initialize scan work item */                                         \
         k_work_init_delayable(&data->scan_work, he_scan_##n);                   \
+
+        if (cfg->idle_scan_period_ms < cfg->scan_period_ms) {                   \
+            LOG_WRN("idle-scan-period-ms(%u) < scan-period-ms(%u)",            \
+                cfg->idle_scan_period_ms, cfg->scan_period_ms);             \
+        }                                                                       \
+
+        data->last_activity_ms = k_uptime_get();                                \
+        data->idle_mode = false;                                                \
                                                                                 \
         /* Run initial calibration (blocking, ~500ms) */                        \
         he_calibrate_##n(dev);                                                  \

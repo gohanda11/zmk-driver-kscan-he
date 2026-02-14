@@ -44,6 +44,25 @@ properties:
     default: 1
     description: Interval between full scan cycles in milliseconds.
 
+  idle-scan-period-ms:
+    type: int
+    default: 12
+    description: |
+      Interval between full scan cycles while idle (all keys stable/released).
+      Must be greater than or equal to scan-period-ms for power saving.
+
+  idle-enter-ms:
+    type: int
+    default: 120
+    description: |
+      Time in milliseconds without key movement before entering idle scan period.
+
+  idle-wakeup-delta:
+    type: int
+    default: 4
+    description: |
+      Minimum change in filtered ADC value that marks key movement and exits idle mode.
+
   settle-us:
     type: int
     default: 20
