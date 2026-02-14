@@ -185,6 +185,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             CONTAINER_OF(dwork, struct he_kscan_data_##n, scan_work);           \
         const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
         struct adc_sequence seq = { 0 };                                        \
+        bool fast_scan_requested = false;                                       \
                                                                                 \
         for (uint8_t addr = 0; addr < cfg->num_addr; addr++) {                  \
             /* 1. Drive MUX address */                                          \
@@ -231,6 +232,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                 }                                                               \
                                                                                 \
                 /* 7. Distance conversion via LUT */                            \
+                uint8_t raw_distance = adc_to_distance(adc_val,                 \
+                                                       ks->adc_rest,            \
+                                                       ks->adc_bottom);         \
                 ks->distance = adc_to_distance(ks->adc_filtered,               \
                                                ks->adc_rest,                    \
                                                ks->adc_bottom);                 \
@@ -238,11 +242,17 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                 /* 8. Threshold + hysteresis press/release detection */         \
                 bool was_pressed = ks->pressed;                                 \
                 if (!ks->pressed &&                                             \
-                    ks->distance >= cfg->press_threshold) {                     \
+                    (raw_distance >= cfg->press_threshold ||                    \
+                     ks->distance >= cfg->press_threshold)) {                   \
                     ks->pressed = true;                                         \
                 } else if (ks->pressed &&                                       \
                            ks->distance <= cfg->release_threshold) {            \
                     ks->pressed = false;                                        \
+                }                                                               \
+                                                                                \
+                if (ks->pressed ||                                              \
+                    (uint16_t)raw_distance + 8u >= cfg->press_threshold) {      \
+                    fast_scan_requested = true;                                 \
                 }                                                               \
                                                                                 \
                 /* 9. Fire callback on state change */                          \
@@ -256,9 +266,10 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             }                                                                   \
         }                                                                       \
                                                                                 \
-        /* Schedule next scan */                                                \
+        /* Schedule next scan (burst mode while activity is detected) */        \
         k_work_reschedule(&data->scan_work,                                     \
-                          K_MSEC(cfg->scan_period_ms));                         \
+                  fast_scan_requested ? K_NO_WAIT                       \
+                              : K_MSEC(cfg->scan_period_ms));   \
     }                                                                           \
                                                                                 \
     /* --------------------------------------------------------------- */       \
