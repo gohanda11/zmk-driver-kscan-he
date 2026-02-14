@@ -10,8 +10,8 @@
 #include <stdbool.h>
 
 /* EMA filter exponent: alpha = 1 / 2^EMA_ALPHA_EXP
- * Higher = smoother but slower response. 4 → alpha ≈ 0.0625 */
-#define EMA_ALPHA_EXP 4
+ * Higher = smoother but slower response. 3 → alpha = 0.125 */
+#define EMA_ALPHA_EXP 3
 
 /* Minimum ADC change required to update calibration values.
  * Prevents noise from drifting rest/bottom-out values. */
