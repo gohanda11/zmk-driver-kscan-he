@@ -234,7 +234,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                 uint16_t prev_filtered = ks->adc_filtered;                      \
                 ks->adc_filtered = EMA(adc_val, ks->adc_filtered);              \
                 ks->adc_prev_filtered = prev_filtered;                          \
-
+                                                                                \
                 uint16_t adc_delta = (ks->adc_filtered >= prev_filtered)        \
                     ? (uint16_t)(ks->adc_filtered - prev_filtered)              \
                     : (uint16_t)(prev_filtered - ks->adc_filtered);             \
@@ -283,11 +283,11 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                    (now - data->last_activity_ms) >= cfg->idle_enter_ms) {      \
             data->idle_mode = true;                                             \
         }                                                                       \
-
+                                                                                \
         uint16_t next_period_ms = data->idle_mode                               \
             ? cfg->idle_scan_period_ms                                          \
             : cfg->scan_period_ms;                                              \
-
+                                                                                \
         /* Schedule next scan */                                                \
         k_work_reschedule(&data->scan_work, K_MSEC(next_period_ms));            \
     }                                                                           \
@@ -438,12 +438,12 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         /* Initialize scan work item */                                         \
         k_work_init_delayable(&data->scan_work, he_scan_##n);                   \
-
+                                                                                \
         if (cfg->idle_scan_period_ms < cfg->scan_period_ms) {                   \
             LOG_WRN("idle-scan-period-ms(%u) < scan-period-ms(%u)",            \
                 cfg->idle_scan_period_ms, cfg->scan_period_ms);             \
         }                                                                       \
-
+                                                                                \
         data->last_activity_ms = k_uptime_get();                                \
         data->idle_mode = false;                                                \
                                                                                 \
