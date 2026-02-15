@@ -173,6 +173,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         int16_t              adc_buf[INST_NUM_ADC(n)];                          \
         int64_t              last_activity_ms;                                  \
         bool                 idle_mode;                                         \
+        uint32_t             scan_count;                                        \
     };                                                                          \
                                                                                 \
     static struct he_kscan_data_##n he_data_##n;
@@ -245,7 +246,14 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                 /* 6. Track bottom-out (max travel) */                          \
                 if (ks->adc_filtered >=                                         \
                     (uint16_t)(ks->adc_bottom + CALIBRATION_EPSILON)) {         \
+                    uint16_t old_bottom = ks->adc_bottom;                       \
                     ks->adc_bottom = ks->adc_filtered;                          \
+                    /* Log bottom updates for diagnostic keys */                \
+                    if (key_idx == 17 || key_idx == 20) {                       \
+                        LOG_WRN("key[%d] bottom updated: %u -> %u (filt=%u)",  \
+                                key_idx, old_bottom, ks->adc_bottom,            \
+                                ks->adc_filtered);                              \
+                    }                                                           \
                 }                                                               \
                                                                                 \
                 /* 7. Distance conversion via LUT */                            \
@@ -287,6 +295,22 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         uint16_t next_period_ms = data->idle_mode                               \
             ? cfg->idle_scan_period_ms                                          \
             : cfg->scan_period_ms;                                              \
+                                                                                \
+        /* Periodic diagnostic logging (every 250 scans ≈ 1 second at 4ms) */  \
+        data->scan_count++;                                                     \
+        if (data->scan_count % 250 == 0) {                                      \
+            /* Log key 17 (LALT) and key 20 (LCTRL) state */                   \
+            if (17 < cfg->num_keys && 20 < cfg->num_keys) {                     \
+                LOG_INF("DIAG [%u] k17: filt=%4u rest=%4u bot=%4u dist=%3u p=%d | k20: filt=%4u rest=%4u bot=%4u dist=%3u p=%d", \
+                    (uint32_t)(data->scan_count / 250),                         \
+                    data->keys[17].adc_filtered, data->keys[17].adc_rest,       \
+                    data->keys[17].adc_bottom, data->keys[17].distance,         \
+                    data->keys[17].pressed,                                     \
+                    data->keys[20].adc_filtered, data->keys[20].adc_rest,       \
+                    data->keys[20].adc_bottom, data->keys[20].distance,         \
+                    data->keys[20].pressed);                                    \
+            }                                                                   \
+        }                                                                       \
                                                                                 \
         /* Schedule next scan */                                                \
         k_work_reschedule(&data->scan_work, K_MSEC(next_period_ms));            \
@@ -359,8 +383,12 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             }                                                                   \
         }                                                                       \
                                                                                 \
-        LOG_INF("HE20 calibration done. key[0] rest=%u key[21] rest=%u",         \
-                data->keys[0].adc_rest, data->keys[21].adc_rest);               \
+        LOG_INF("HE20 calibration done.");                                      \
+        /* Log all key calibration values for diagnosis */                     \
+        for (uint8_t k = 0; k < cfg->num_keys; k++) {                           \
+            LOG_INF("  key[%2d] rest=%4u bottom=%4u",                           \
+                    k, data->keys[k].adc_rest, data->keys[k].adc_bottom);       \
+        }                                                                       \
     }                                                                           \
                                                                                 \
     /* --------------------------------------------------------------- */       \
@@ -446,6 +474,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         data->last_activity_ms = k_uptime_get();                                \
         data->idle_mode = false;                                                \
+        data->scan_count = 0;                                                   \
                                                                                 \
         /* Run initial calibration (blocking, ~500ms) */                        \
         he_calibrate_##n(dev);                                                  \

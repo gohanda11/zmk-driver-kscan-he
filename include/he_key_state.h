@@ -14,8 +14,9 @@
 #define EMA_ALPHA_EXP 3
 
 /* Minimum ADC change required to update calibration values.
- * Prevents noise from drifting rest/bottom-out values. */
-#define CALIBRATION_EPSILON 5
+ * Prevents noise from drifting rest/bottom-out values.
+ * Increased from 5 to 20 to prevent false bottom updates from noise. */
+#define CALIBRATION_EPSILON 20
 
 /* Maximum ADC raw value for 12-bit SAADC */
 #define ADC_MAX_VALUE 4095
