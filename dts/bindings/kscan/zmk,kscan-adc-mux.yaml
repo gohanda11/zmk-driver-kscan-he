@@ -1,0 +1,118 @@
+# Copyright (c) 2024 HE20 Contributors
+# SPDX-License-Identifier: MIT
+
+description: |
+  Hall Effect keyboard scanner using SN74LV4051A analog multiplexers.
+  Reads ADC values through multiplexers and converts to key press/release
+  events using threshold detection with EMA filtering and calibration.
+
+compatible: "zmk,kscan-adc-mux"
+
+include: kscan.yaml
+
+properties:
+  select-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      GPIO pins for MUX address select lines S0, S1, S2 (LSB first).
+      3 pins encode 8 MUX channel addresses (0-7).
+
+  io-channels:
+    type: phandle-array
+    required: true
+    description: |
+      ADC channels connected to each MUX common output (COM/X).
+      One entry per multiplexer.
+
+  mux_map:
+    type: array
+    required: true
+    description: |
+      Flat array mapping each (mux_address, adc_index) slot to a key index.
+      Layout: [addr0_adc0, addr0_adc1, ..., addr1_adc0, addr1_adc1, ...]
+      Total size: num_addresses * num_io_channels.
+      Use 255 (0xFF) for unused/unconnected slots.
+
+  num-keys:
+    type: int
+    required: true
+    description: Total number of keys (key indices 0..num-keys-1 are valid).
+
+  scan-period-ms:
+    type: int
+    default: 1
+    description: Interval between full scan cycles in milliseconds.
+
+  idle-scan-period-ms:
+    type: int
+    default: 12
+    description: |
+      Interval between full scan cycles while idle (all keys stable/released).
+      Must be greater than or equal to scan-period-ms for power saving.
+
+  idle-enter-ms:
+    type: int
+    default: 120
+    description: |
+      Time in milliseconds without key movement before entering idle scan period.
+
+  idle-wakeup-delta:
+    type: int
+    default: 4
+    description: |
+      Minimum change in filtered ADC value that marks key movement and exits idle mode.
+
+  settle-us:
+    type: int
+    default: 20
+    description: |
+      Microseconds to wait after changing MUX address before ADC read.
+      Allows MUX output to settle. Increase if ADC values are unstable.
+
+  invert-adc:
+    type: boolean
+    description: |
+      Invert ADC values (ADC_MAX - raw) before processing.
+      Set when the sensor output voltage decreases as the key is pressed.
+
+  press-threshold:
+    type: int
+    default: 60
+    description: |
+      Distance value (0-255) at which key is considered pressed.
+      Must be greater than release-threshold.
+
+  release-threshold:
+    type: int
+    default: 50
+    description: |
+      Distance value (0-255) at which key is considered released.
+      Must be less than press-threshold (hysteresis gap).
+
+  debounce-ms:
+    type: int
+    default: 5
+    description: |
+      Minimum time in milliseconds between consecutive state transitions
+      (press→release or release→press) for each key. Prevents spurious
+      repeated key events caused by EMA filter oscillation near thresholds.
+
+  initial-adc-range:
+    type: int
+    default: 650
+    description: |
+      Initial estimated ADC span from key rest position to bottom-out.
+      Used as the initial adc_bottom = adc_rest + initial-adc-range during
+      calibration. The driver updates this dynamically once a key is pressed
+      past the estimate, but if it is never exceeded the value is used as-is
+      for distance normalization. Tune this down for short-travel switches
+      (e.g. 300 for 2.8 mm switches) so that the normalized distance is
+      accurate from the very first key press.
+
+  calibration-duration-ms:
+    type: int
+    default: 500
+    description: |
+      Duration of initial rest value calibration in milliseconds.
+      Keys must be fully released during this period.
