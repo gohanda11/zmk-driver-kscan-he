@@ -116,3 +116,19 @@ properties:
     description: |
       Duration of initial rest value calibration in milliseconds.
       Keys must be fully released during this period.
+
+  sleep-gpios:
+    type: phandle-array
+    required: false
+    description: |
+      SC4823 SLEEP control pin (Active High).
+      High → sensor Mode 3 (sleep + active wakeup monitoring)
+      Low  → sensor Mode 1 (normal operation)
+
+  wakeup-gpios:
+    type: phandle-array
+    required: false
+    description: |
+      SC4823 AWAKE pin (Active Low, all sensors wired-OR).
+      In Mode 3, outputs Low when key press is detected.
+      Used for nRF52840 GPIO SENSE-based System OFF wakeup.

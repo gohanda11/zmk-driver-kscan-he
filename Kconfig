@@ -7,6 +7,7 @@ config ZMK_KSCAN_ADC_MUX
     default $(dt_compat_enabled,$(DT_COMPAT_ZMK_KSCAN_ADC_MUX))
     select ADC
     select GPIO
+    select PM_DEVICE if ZMK_SLEEP
     help
       Enable the Hall Effect keyboard scanner driver using
       SN74LV4051A analog multiplexers and SAADC.

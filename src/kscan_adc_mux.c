@@ -22,6 +22,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <hal/nrf_gpio.h>
 
 #include "he_key_state.h"
 
@@ -146,6 +148,10 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         uint16_t calibration_duration_ms;                                       \
         uint16_t debounce_ms;                                                   \
         uint16_t initial_adc_range;                                             \
+        struct gpio_dt_spec sleep_gpio;                                         \
+        struct gpio_dt_spec wakeup_gpio;                                        \
+        bool has_sleep_gpio;                                                    \
+        bool has_wakeup_gpio;                                                   \
     };                                                                          \
                                                                                 \
     static const struct he_kscan_cfg_##n he_cfg_##n = {                         \
@@ -167,6 +173,12 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         .calibration_duration_ms = DT_INST_PROP(n, calibration_duration_ms),    \
         .debounce_ms             = DT_INST_PROP_OR(n, debounce_ms, 5),         \
         .initial_adc_range       = DT_INST_PROP_OR(n, initial_adc_range, 650), \
+        .has_sleep_gpio = DT_INST_NODE_HAS_PROP(n, sleep_gpios),               \
+        .sleep_gpio = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, sleep_gpios),       \
+            (GPIO_DT_SPEC_INST_GET(n, sleep_gpios)), ({0})),                    \
+        .has_wakeup_gpio = DT_INST_NODE_HAS_PROP(n, wakeup_gpios),             \
+        .wakeup_gpio = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, wakeup_gpios),     \
+            (GPIO_DT_SPEC_INST_GET(n, wakeup_gpios)), ({0})),                   \
     };                                                                          \
                                                                                 \
     /* Driver runtime data */                                                   \
@@ -477,6 +489,24 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             }                                                                   \
         }                                                                       \
                                                                                 \
+        /* SC4823 SLEEP pin: output, default LOW (Mode 1: normal) */             \
+        if (cfg->has_sleep_gpio) {                                              \
+            if (!device_is_ready(cfg->sleep_gpio.port)) {                       \
+                LOG_ERR("Sleep GPIO port not ready");                           \
+                return -ENODEV;                                                 \
+            }                                                                   \
+            gpio_pin_configure_dt(&cfg->sleep_gpio, GPIO_OUTPUT_LOW);           \
+        }                                                                       \
+                                                                                \
+        /* SC4823 AWAKE pin: input with pull-up */                              \
+        if (cfg->has_wakeup_gpio) {                                             \
+            if (!device_is_ready(cfg->wakeup_gpio.port)) {                      \
+                LOG_ERR("Wakeup GPIO port not ready");                          \
+                return -ENODEV;                                                 \
+            }                                                                   \
+            gpio_pin_configure_dt(&cfg->wakeup_gpio, GPIO_INPUT | GPIO_PULL_UP);\
+        }                                                                       \
+                                                                                \
         /* Initialize scan work item */                                         \
         k_work_init_delayable(&data->scan_work, he_scan_##n);                   \
                                                                                 \
@@ -502,9 +532,66 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         .disable_callback = he_kscan_disable_##n,                               \
     };                                                                          \
                                                                                 \
+    static int he_kscan_pm_action_##n(const struct device *dev,                 \
+                                      enum pm_device_action action)             \
+    {                                                                           \
+        const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
+        struct he_kscan_data_##n *data = dev->data;                             \
+                                                                                \
+        switch (action) {                                                       \
+        case PM_DEVICE_ACTION_SUSPEND:                                          \
+            /* Stop scanning */                                                 \
+            k_work_cancel_delayable(&data->scan_work);                          \
+                                                                                \
+            /* SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */        \
+            if (cfg->has_sleep_gpio) {                                          \
+                gpio_pin_set_dt(&cfg->sleep_gpio, 1);                           \
+            }                                                                   \
+                                                                                \
+            /* Set SENSE_LOW on AWAKE pin for System OFF wakeup */              \
+            if (cfg->has_wakeup_gpio) {                                         \
+                uint32_t abs_pin = NRF_GPIO_PIN_MAP(                            \
+                    (cfg->wakeup_gpio.port ==                                   \
+                     DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,              \
+                    cfg->wakeup_gpio.pin);                                      \
+                nrf_gpio_cfg_sense_set(abs_pin, NRF_GPIO_PIN_SENSE_LOW);        \
+            }                                                                   \
+                                                                                \
+            /* MUX select lines LOW (power saving) */                           \
+            for (uint8_t i = 0; i < cfg->num_select; i++) {                     \
+                gpio_pin_set_dt(&cfg->select_gpios[i], 0);                      \
+            }                                                                   \
+            LOG_INF("HE kscan suspended (SC4823 Mode 3 wakeup active)");        \
+            return 0;                                                           \
+                                                                                \
+        case PM_DEVICE_ACTION_RESUME:                                           \
+            /* SLEEP=Low → SC4823 normal operation (<5us recovery) */          \
+            if (cfg->has_sleep_gpio) {                                          \
+                gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
+            }                                                                   \
+                                                                                \
+            /* Re-calibrate after wakeup */                                     \
+            he_calibrate_##n(dev);                                              \
+                                                                                \
+            /* Restart scanning */                                              \
+            data->last_activity_ms = k_uptime_get();                            \
+            data->idle_mode = false;                                            \
+            data->scan_count = 0;                                               \
+            k_work_reschedule(&data->scan_work,                                 \
+                              K_MSEC(cfg->scan_period_ms));                     \
+            LOG_INF("HE kscan resumed");                                        \
+            return 0;                                                           \
+                                                                                \
+        default:                                                                \
+            return -ENOTSUP;                                                    \
+        }                                                                       \
+    }                                                                           \
+                                                                                \
+    PM_DEVICE_DT_INST_DEFINE(n, he_kscan_pm_action_##n);                        \
+                                                                                \
     DEVICE_DT_INST_DEFINE(n,                                                    \
                           he_kscan_init_##n,                                    \
-                          NULL,                                                 \
+                          PM_DEVICE_DT_INST_GET(n),                             \
                           &he_data_##n,                                         \
                           &he_cfg_##n,                                          \
                           POST_KERNEL,                                          \
