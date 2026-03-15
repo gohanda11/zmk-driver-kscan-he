@@ -24,6 +24,10 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
 
+#if IS_ENABLED(CONFIG_NRFX_LPCOMP)
+#include <nrfx_lpcomp.h>
+#endif
+
 #include "he_key_state.h"
 
 #if IS_ENABLED(CONFIG_ZMK_SLEEP)
@@ -156,6 +160,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         struct gpio_dt_spec wakeup_gpio;                                        \
         bool has_sleep_gpio;                                                    \
         bool has_wakeup_gpio;                                                   \
+        bool has_lpcomp;                                                        \
+        uint8_t lpcomp_input;    /* AIN channel: 0-7 */                        \
+        uint8_t lpcomp_mux_addr; /* MUX address to fix before sleep */         \
     };                                                                          \
                                                                                 \
     static const struct he_kscan_cfg_##n he_cfg_##n = {                         \
@@ -183,6 +190,10 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         .has_wakeup_gpio = DT_INST_NODE_HAS_PROP(n, wakeup_gpios),             \
         .wakeup_gpio = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, wakeup_gpios),     \
             (GPIO_DT_SPEC_INST_GET(n, wakeup_gpios)), ({0})),                   \
+        .has_lpcomp    = IS_ENABLED(CONFIG_NRFX_LPCOMP) &&                     \
+                         DT_INST_NODE_HAS_PROP(n, lpcomp_input),               \
+        .lpcomp_input    = DT_INST_PROP_OR(n, lpcomp_input, 0xFF),             \
+        .lpcomp_mux_addr = DT_INST_PROP_OR(n, lpcomp_mux_addr, 0),            \
     };                                                                          \
                                                                                 \
     /* Driver runtime data */                                                   \
@@ -551,6 +562,76 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         .disable_callback = he_kscan_disable_##n,                               \
     };                                                                          \
                                                                                 \
+    /* --------------------------------------------------------------- */       \
+    /* LPCOMP dummy event handler (IRQ required by nrfx but unused  */       \
+    /* after System OFF - CPU resets on wakeup, handler never runs) */       \
+    /* --------------------------------------------------------------- */       \
+    IF_ENABLED(CONFIG_NRFX_LPCOMP, (                                            \
+    static void he_lpcomp_evt_##n(nrf_lpcomp_event_t e) { (void)e; }           \
+    ))                                                                          \
+                                                                                \
+    /* --------------------------------------------------------------- */       \
+    /* Shared wakeup setup: called from both PM SUSPEND and activity  */       \
+    /* listener. Configures LPCOMP (or AWAKE SENSE_LOW fallback) and  */       \
+    /* fixes the MUX before System OFF.                               */       \
+    /* --------------------------------------------------------------- */       \
+    static void he_kscan_setup_wakeup_##n(void)                                 \
+    {                                                                           \
+        const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
+                                                                                \
+        IF_ENABLED(CONFIG_NRFX_LPCOMP, (                                        \
+        if (cfg->has_lpcomp) {                                                  \
+            /* Fix MUX at the chosen wakeup address */                          \
+            set_mux_address(cfg->select_gpios, cfg->num_select,                 \
+                            cfg->lpcomp_mux_addr);                              \
+            k_sleep(K_MSEC(20)); /* VOUT settle */                              \
+                                                                                \
+            /* Keep SLEEP=Low: SC4823 stays in Mode 1, VOUT always valid */    \
+            if (cfg->has_sleep_gpio) {                                          \
+                gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
+            }                                                                   \
+                                                                                \
+            /* Configure LPCOMP: AIN<lpcomp_input>, threshold = VDD*6/8  */   \
+            /* (≈75% VDD). Ratiometric sensors: always between rest/pressed.*/\
+            nrfx_lpcomp_config_t lp_cfg = {                                    \
+                .hal = {                                                         \
+                    .reference = NRF_LPCOMP_REF_SUPPLY_6_8,                    \
+                    .detection = NRF_LPCOMP_DETECT_DOWN,                        \
+                    .hyst      = NRF_LPCOMP_HYST_ENABLED,                      \
+                },                                                              \
+                .input              = (nrf_lpcomp_input_t)cfg->lpcomp_input,   \
+                .interrupt_priority = 6,                                        \
+            };                                                                  \
+            nrfx_err_t _err = nrfx_lpcomp_init(&lp_cfg, he_lpcomp_evt_##n);   \
+            if (_err == NRFX_SUCCESS ||                                         \
+                _err == NRFX_ERROR_ALREADY_INITIALIZED) {                      \
+                nrfx_lpcomp_enable();                                           \
+                LOG_INF("HE kscan[" #n "]: LPCOMP AIN%d MUX_addr=%d "         \
+                        "thr=VDD*6/8 → System OFF wakeup ready",               \
+                        cfg->lpcomp_input, cfg->lpcomp_mux_addr);              \
+            } else {                                                             \
+                LOG_ERR("HE kscan[" #n "]: LPCOMP init failed %d", _err);     \
+            }                                                                   \
+            return; /* LPCOMP path done */                                      \
+        }                                                                       \
+        )) /* IF_ENABLED(CONFIG_NRFX_LPCOMP) */                                 \
+                                                                                \
+        /* Fallback: AWAKE SENSE_LOW (SC4823 Mode 3) */                        \
+        for (uint8_t _i = 0; _i < cfg->num_select; _i++) {                      \
+            gpio_pin_set_dt(&cfg->select_gpios[_i], 0);                         \
+        }                                                                       \
+        k_sleep(K_MSEC(10));                                                    \
+        if (cfg->has_sleep_gpio) {                                              \
+            gpio_pin_set_dt(&cfg->sleep_gpio, 1);                               \
+        }                                                                       \
+        k_sleep(K_MSEC(50));                                                    \
+        if (cfg->has_wakeup_gpio) {                                             \
+            gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,                  \
+                                            GPIO_INT_LEVEL_ACTIVE);             \
+            LOG_INF("HE kscan[" #n "]: AWAKE SENSE_LOW → System OFF wakeup"); \
+        }                                                                       \
+    }                                                                           \
+                                                                                \
     static int he_kscan_pm_action_##n(const struct device *dev,                 \
                                       enum pm_device_action action)             \
     {                                                                           \
@@ -559,63 +640,31 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         switch (action) {                                                       \
         case PM_DEVICE_ACTION_SUSPEND:                                          \
-            LOG_INF("HE kscan[" #n "]: PM_DEVICE_ACTION_SUSPEND");             \
-            /* Stop scanning */                                                 \
+            LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
-                                                                                \
-            /* Step 1: MUX→LOW first so SC4823 sees stable VOUT at rest */     \
-            for (uint8_t _i = 0; _i < cfg->num_select; _i++) {                  \
-                gpio_pin_set_dt(&cfg->select_gpios[_i], 0);                     \
-            }                                                                   \
-            k_sleep(K_MSEC(10));  /* let VOUT settle at addr=0 */               \
-                                                                                \
-            /* Step 2: SLEEP=High → SC4823 Mode 3 */                           \
-            if (cfg->has_sleep_gpio) {                                          \
-                int ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);                 \
-                LOG_INF("HE kscan: SLEEP=High ret=%d", ret);                   \
-            }                                                                   \
-                                                                                \
-            /* Step 3: Wait for SC4823 to complete ≥4 monitoring cycles */     \
-            /* (12.5ms × 4 = 50ms) so AWAKE reflects true idle state */        \
-            k_sleep(K_MSEC(50));                                                \
-                                                                                \
-            /* Step 4: Read AWAKE stability before enabling SENSE_LOW */       \
-            if (cfg->has_wakeup_gpio) {                                         \
-                gpio_port_value_t _pval = 0;                                    \
-                gpio_port_get_raw(cfg->wakeup_gpio.port, &_pval);               \
-                int _awake_phys = (_pval >> cfg->wakeup_gpio.pin) & 1;          \
-                LOG_INF("HE kscan: AWAKE after 50ms = %s",                     \
-                        _awake_phys ? "HIGH(ok)" :                              \
-                        "LOW! vout<vq-0.4V: magnets shift VOUT or wiring issue"); \
-                int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,   \
-                                                GPIO_INT_LEVEL_ACTIVE);         \
-                LOG_INF("HE kscan: AWAKE SENSE_LOW ret=%d", _ret);             \
-            }                                                                   \
-            LOG_INF("HE kscan[" #n "]: suspended → sys_poweroff pending");     \
+            he_kscan_setup_wakeup_##n();                                        \
             return 0;                                                           \
                                                                                 \
         case PM_DEVICE_ACTION_RESUME:                                           \
-            /* SLEEP=Low → SC4823 normal operation (<5us recovery) */          \
-            if (cfg->has_sleep_gpio) {                                          \
-                gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
+            /* Disable LPCOMP (or AWAKE interrupt) */                           \
+            IF_ENABLED(CONFIG_NRFX_LPCOMP, (                                    \
+            if (cfg->has_lpcomp) {                                              \
+                nrfx_lpcomp_disable();                                          \
+                nrfx_lpcomp_uninit();                                           \
             }                                                                   \
-                                                                                \
-            /* Disable AWAKE interrupt (SENSE_LOW no longer needed) */          \
+            ))                                                                  \
             if (cfg->has_wakeup_gpio) {                                         \
                 gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,              \
                                                 GPIO_INT_DISABLE);              \
             }                                                                   \
-                                                                                \
-            /* Re-calibrate after wakeup */                                     \
+            /* Re-calibrate and restart scanning */                             \
             he_calibrate_##n(dev);                                              \
-                                                                                \
-            /* Restart scanning */                                              \
             data->last_activity_ms = k_uptime_get();                            \
             data->idle_mode = false;                                            \
             data->scan_count = 0;                                               \
             k_work_reschedule(&data->scan_work,                                 \
                               K_MSEC(cfg->scan_period_ms));                     \
-            LOG_INF("HE kscan resumed");                                        \
+            LOG_INF("HE kscan[" #n "]: resumed");                              \
             return 0;                                                           \
                                                                                 \
         default:                                                                \
@@ -623,82 +672,23 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         }                                                                       \
     }                                                                           \
                                                                                 \
-    /* --------------------------------------------------------------- */       \
-    /* ZMK activity listener: configure wakeup on idle sleep path    */       \
-    /* (zmk_pm_suspend_devices skips wakeup-enabled kscan devices,  */       \
-    /*  so PM_DEVICE_ACTION_SUSPEND is not called for idle sleep.    */       \
-    /* This listener fires synchronously before sys_poweroff().)     */       \
-    /* --------------------------------------------------------------- */       \
     IF_ENABLED(CONFIG_ZMK_SLEEP, (                                              \
     static int he_kscan_activity_event_##n(const zmk_event_t *eh)               \
     {                                                                           \
         const struct zmk_activity_state_changed *ev =                           \
             as_zmk_activity_state_changed(eh);                                  \
-        if (ev == NULL) {                                                        \
-            return ZMK_EV_EVENT_BUBBLE;                                         \
-        }                                                                       \
+        if (ev == NULL) { return ZMK_EV_EVENT_BUBBLE; }                         \
         LOG_DBG("HE kscan[" #n "] activity state -> %d", ev->state);           \
-        if (ev->state != ZMK_ACTIVITY_SLEEP) {                                  \
-            return ZMK_EV_EVENT_BUBBLE;                                         \
-        }                                                                       \
-                                                                                \
-        const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
-        int ret;                                                                \
-                                                                                \
-        /* Step 1: MUX→LOW first so SC4823 sees stable VOUT at rest */         \
-        for (uint8_t _i = 0; _i < cfg->num_select; _i++) {                      \
-            gpio_pin_set_dt(&cfg->select_gpios[_i], 0);                         \
-        }                                                                       \
-        k_sleep(K_MSEC(10));  /* let MUX output settle */                       \
-                                                                                \
-        /* Step 2: SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */    \
-        if (cfg->has_sleep_gpio) {                                              \
-            ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);                         \
-            if (ret < 0) {                                                      \
-                LOG_ERR("HE kscan: SLEEP pin set failed: %d", ret);             \
-            } else {                                                             \
-                LOG_INF("HE kscan[" #n "]: SLEEP=High (SC4823 Mode 3)");        \
-            }                                                                   \
-        } else {                                                                \
-            LOG_WRN("HE kscan[" #n "]: no sleep-gpios configured");             \
-        }                                                                       \
-                                                                                \
-        /* Step 3: Wait for SC4823 to take ≥4 monitoring cycles (50ms) */      \
-        k_sleep(K_MSEC(50));                                                    \
-                                                                                \
-        /* Step 4: Check AWAKE; log result; enable SENSE_LOW for wakeup */     \
-        if (cfg->has_wakeup_gpio) {                                             \
-            gpio_port_value_t _pval = 0;                                        \
-            gpio_port_get_raw(cfg->wakeup_gpio.port, &_pval);                   \
-            int _awake_phys = (_pval >> cfg->wakeup_gpio.pin) & 1;              \
-            LOG_INF("HE kscan[" #n "]: AWAKE after 50ms = %s (P%d.%02d)",     \
-                    _awake_phys ? "HIGH(ok)" :                                   \
-                    "LOW! VOUT<VQ-0.4V: magnets or wiring issue",               \
-                    (cfg->wakeup_gpio.port ==                                   \
-                     DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,              \
-                    cfg->wakeup_gpio.pin);                                      \
-            ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,            \
-                                                  GPIO_INT_LEVEL_ACTIVE);       \
-            if (ret < 0) {                                                      \
-                LOG_ERR("HE kscan: AWAKE interrupt configure failed: %d", ret); \
-            } else {                                                             \
-                LOG_INF("HE kscan[" #n "]: AWAKE SENSE_LOW set");               \
-            }                                                                   \
-        } else {                                                                \
-            LOG_WRN("HE kscan[" #n "]: no wakeup-gpios configured");            \
-        }                                                                       \
-                                                                                \
-        LOG_INF("HE kscan[" #n "]: idle sleep wakeup ready → sys_poweroff"); \
+        if (ev->state != ZMK_ACTIVITY_SLEEP) { return ZMK_EV_EVENT_BUBBLE; }   \
+        he_kscan_setup_wakeup_##n();                                            \
+        LOG_INF("HE kscan[" #n "]: idle sleep wakeup ready");                  \
         return ZMK_EV_EVENT_BUBBLE;                                             \
     }                                                                           \
     ZMK_LISTENER(he_kscan_activity_##n, he_kscan_activity_event_##n);          \
     ZMK_SUBSCRIPTION(he_kscan_activity_##n, zmk_activity_state_changed);       \
     )) /* IF_ENABLED(CONFIG_ZMK_SLEEP) */                                       \
                                                                                 \
-    /* APPLICATION-phase P1.01 (AWAKE pin) 3-phase diagnostic test       */     \
-    /* Phase 1: Mode 1 (SLEEP=Low) baseline - is pin pulled LOW?       */     \
-    /* Phase 2: Mode 3 (SLEEP=High) idle - should be HIGH if no press  */     \
-    /* Phase 3: Mode 3 press detection - press a key to see LOW        */     \
+    static int he_awake_pin_test_##n(void) __attribute__((unused));            \
     static int he_awake_pin_test_##n(void)                                      \
     {                                                                           \
         const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
@@ -843,8 +833,6 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         k_work_reschedule(&data->scan_work, K_MSEC(cfg->scan_period_ms));       \
         return 0;                                                               \
     }                                                                           \
-    SYS_INIT(he_awake_pin_test_##n, APPLICATION, 99);                               \
-                                                                                \
     PM_DEVICE_DT_INST_DEFINE(n, he_kscan_pm_action_##n);                        \
                                                                                 \
     DEVICE_DT_INST_DEFINE(n,                                                    \
