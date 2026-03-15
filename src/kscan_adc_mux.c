@@ -526,7 +526,8 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         /* Run initial calibration (blocking, ~500ms) */                        \
         he_calibrate_##n(dev);                                                  \
                                                                                 \
-        LOG_INF("HE20 kscan driver initialized (%d keys)", cfg->num_keys);      \
+        LOG_INF("HE20 kscan driver initialized (%d keys) uptime=%lldms",        \
+                cfg->num_keys, k_uptime_get());                                 \
         return 0;                                                               \
     }                                                                           \
                                                                                 \
@@ -544,25 +545,28 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         switch (action) {                                                       \
         case PM_DEVICE_ACTION_SUSPEND:                                          \
+            LOG_INF("HE kscan[" #n "]: PM_DEVICE_ACTION_SUSPEND (soft-off)"); \
             /* Stop scanning */                                                 \
             k_work_cancel_delayable(&data->scan_work);                          \
                                                                                 \
             /* SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */        \
             if (cfg->has_sleep_gpio) {                                          \
-                gpio_pin_set_dt(&cfg->sleep_gpio, 1);                           \
+                int ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);                 \
+                LOG_INF("HE kscan: SLEEP=High ret=%d", ret);                   \
             }                                                                   \
                                                                                 \
             /* Configure AWAKE pin interrupt (SENSE_LOW) for System OFF wakeup */ \
             if (cfg->has_wakeup_gpio) {                                         \
-                gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,              \
+                int ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,    \
                                                 GPIO_INT_LEVEL_ACTIVE);         \
+                LOG_INF("HE kscan: AWAKE SENSE_LOW ret=%d", ret);              \
             }                                                                   \
                                                                                 \
             /* MUX select lines LOW (power saving) */                           \
             for (uint8_t i = 0; i < cfg->num_select; i++) {                     \
                 gpio_pin_set_dt(&cfg->select_gpios[i], 0);                      \
             }                                                                   \
-            LOG_INF("HE kscan suspended (SC4823 Mode 3 wakeup active)");        \
+            LOG_INF("HE kscan[" #n "]: suspended → sys_poweroff pending");     \
             return 0;                                                           \
                                                                                 \
         case PM_DEVICE_ACTION_RESUME:                                           \
@@ -605,24 +609,46 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     {                                                                           \
         const struct zmk_activity_state_changed *ev =                           \
             as_zmk_activity_state_changed(eh);                                  \
-        if (ev == NULL || ev->state != ZMK_ACTIVITY_SLEEP) {                    \
+        if (ev == NULL) {                                                        \
+            return ZMK_EV_EVENT_BUBBLE;                                         \
+        }                                                                       \
+        LOG_DBG("HE kscan[" #n "] activity state -> %d", ev->state);           \
+        if (ev->state != ZMK_ACTIVITY_SLEEP) {                                  \
             return ZMK_EV_EVENT_BUBBLE;                                         \
         }                                                                       \
                                                                                 \
         const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
+        int ret;                                                                \
                                                                                 \
         /* SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */            \
         if (cfg->has_sleep_gpio) {                                              \
-            gpio_pin_set_dt(&cfg->sleep_gpio, 1);                               \
+            ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);                         \
+            if (ret < 0) {                                                      \
+                LOG_ERR("HE kscan: SLEEP pin set failed: %d", ret);             \
+            } else {                                                             \
+                LOG_INF("HE kscan[" #n "]: SLEEP=High (SC4823 Mode 3)");        \
+            }                                                                   \
+        } else {                                                                \
+            LOG_WRN("HE kscan[" #n "]: no sleep-gpios configured");             \
         }                                                                       \
                                                                                 \
         /* SENSE_LOW on AWAKE pin for System OFF wakeup */                      \
         if (cfg->has_wakeup_gpio) {                                             \
-            gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,                  \
-                                            GPIO_INT_LEVEL_ACTIVE);             \
+            ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,            \
+                                                  GPIO_INT_LEVEL_ACTIVE);       \
+            if (ret < 0) {                                                      \
+                LOG_ERR("HE kscan: AWAKE interrupt configure failed: %d", ret); \
+            } else {                                                             \
+                LOG_INF("HE kscan[" #n "]: AWAKE SENSE_LOW set (P%d.%02d)",    \
+                        (cfg->wakeup_gpio.port ==                               \
+                         DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,          \
+                        cfg->wakeup_gpio.pin);                                  \
+            }                                                                   \
+        } else {                                                                \
+            LOG_WRN("HE kscan[" #n "]: no wakeup-gpios configured");            \
         }                                                                       \
                                                                                 \
-        LOG_INF("HE kscan: SC4823 Mode 3 wakeup configured for idle sleep");   \
+        LOG_INF("HE kscan[" #n "]: idle sleep wakeup ready → sys_poweroff"); \
         return ZMK_EV_EVENT_BUBBLE;                                             \
     }                                                                           \
     ZMK_LISTENER(he_kscan_activity_##n, he_kscan_activity_event_##n);          \
