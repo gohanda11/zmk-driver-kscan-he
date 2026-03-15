@@ -526,6 +526,22 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         /* Run initial calibration (blocking, ~500ms) */                        \
         he_calibrate_##n(dev);                                                  \
                                                                                 \
+        /* SC4823 Mode 3 hardware test: verify AWAKE pin goes Low on key press */ \
+        if (cfg->has_sleep_gpio && cfg->has_wakeup_gpio) {                      \
+            LOG_INF("HE kscan[" #n "]: Mode3 test START - press a key NOW (10s)"); \
+            gpio_pin_set_dt(&cfg->sleep_gpio, 1); /* SLEEP=High → Mode 3 */    \
+            k_sleep(K_MSEC(50)); /* SC4823 stabilize */                         \
+            for (int _t = 0; _t < 100; _t++) {                                 \
+                int _awake = gpio_pin_get_dt(&cfg->wakeup_gpio);                \
+                if (_awake == 0) {                                              \
+                    LOG_INF("HE kscan[" #n "]: Mode3 test: AWAKE=LOW! Key detected at %dms (SC4823 OK)", _t * 100); \
+                }                                                               \
+                k_sleep(K_MSEC(100));                                           \
+            }                                                                   \
+            gpio_pin_set_dt(&cfg->sleep_gpio, 0); /* SLEEP=Low → Mode 1 */     \
+            LOG_INF("HE kscan[" #n "]: Mode3 test DONE → SLEEP=Low (normal)"); \
+        }                                                                       \
+                                                                                \
         LOG_INF("HE20 kscan driver initialized (%d keys) uptime=%lldms",        \
                 cfg->num_keys, k_uptime_get());                                 \
         return 0;                                                               \
@@ -557,6 +573,8 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
             /* Configure AWAKE pin interrupt (SENSE_LOW) for System OFF wakeup */ \
             if (cfg->has_wakeup_gpio) {                                         \
+                int _awake_now = gpio_pin_get_dt(&cfg->wakeup_gpio);            \
+                LOG_INF("HE kscan: AWAKE pin now=%d (expect 1=High)", _awake_now); \
                 int ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,    \
                                                 GPIO_INT_LEVEL_ACTIVE);         \
                 LOG_INF("HE kscan: AWAKE SENSE_LOW ret=%d", ret);              \
