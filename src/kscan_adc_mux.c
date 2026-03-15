@@ -545,7 +545,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         switch (action) {                                                       \
         case PM_DEVICE_ACTION_SUSPEND:                                          \
-            LOG_INF("HE kscan[" #n "]: PM_DEVICE_ACTION_SUSPEND (soft-off)"); \
+            LOG_INF("HE kscan[" #n "]: PM_DEVICE_ACTION_SUSPEND"); \
             /* Stop scanning */                                                 \
             k_work_cancel_delayable(&data->scan_work);                          \
                                                                                 \
