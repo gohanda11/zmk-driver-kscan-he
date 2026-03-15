@@ -133,22 +133,3 @@ properties:
       In Mode 3, outputs Low when key press is detected.
       Used for nRF52840 GPIO SENSE-based System OFF wakeup.
 
-  lpcomp-input:
-    type: int
-    required: false
-    description: |
-      nRF52840 LPCOMP analog input channel for System OFF wakeup.
-      AIN channel number: 0=AIN0, 1=AIN1, 2=AIN2, 4=AIN4(P0.28), 5=AIN5.
-      When set, SC4823 stays in Mode 1 (SLEEP=Low) during System OFF.
-      LPCOMP monitors VOUT on this channel directly, triggering wakeup
-      when VOUT drops below VDD*6/8 (~75% VDD, between rest and pressed).
-      Overrides the AWAKE-pin approach when present.
-
-  lpcomp-mux-addr:
-    type: int
-    required: false
-    default: 0
-    description: |
-      MUX address (0-7) to fix before System OFF when using LPCOMP.
-      The sensor at this MUX address on the lpcomp-input channel is
-      the key that triggers wakeup when pressed.
