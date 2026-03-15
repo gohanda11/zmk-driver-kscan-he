@@ -526,22 +526,6 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         /* Run initial calibration (blocking, ~500ms) */                        \
         he_calibrate_##n(dev);                                                  \
                                                                                 \
-        /* SC4823 Mode 3 hardware test: verify AWAKE pin goes Low on key press */ \
-        if (cfg->has_sleep_gpio && cfg->has_wakeup_gpio) {                      \
-            LOG_INF("HE kscan[" #n "]: Mode3 test START - press a key NOW (10s)"); \
-            gpio_pin_set_dt(&cfg->sleep_gpio, 1); /* SLEEP=High → Mode 3 */    \
-            k_sleep(K_MSEC(50)); /* SC4823 stabilize */                         \
-            for (int _t = 0; _t < 100; _t++) {                                 \
-                int _awake = gpio_pin_get_dt(&cfg->wakeup_gpio);                \
-                if (_awake == 0) {                                              \
-                    LOG_INF("HE kscan[" #n "]: Mode3 test: AWAKE=LOW! Key detected at %dms (SC4823 OK)", _t * 100); \
-                }                                                               \
-                k_sleep(K_MSEC(100));                                           \
-            }                                                                   \
-            gpio_pin_set_dt(&cfg->sleep_gpio, 0); /* SLEEP=Low → Mode 1 */     \
-            LOG_INF("HE kscan[" #n "]: Mode3 test DONE → SLEEP=Low (normal)"); \
-        }                                                                       \
-                                                                                \
         LOG_INF("HE20 kscan driver initialized (%d keys) uptime=%lldms",        \
                 cfg->num_keys, k_uptime_get());                                 \
         return 0;                                                               \
@@ -672,6 +656,34 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     ZMK_LISTENER(he_kscan_activity_##n, he_kscan_activity_event_##n);          \
     ZMK_SUBSCRIPTION(he_kscan_activity_##n, zmk_activity_state_changed);       \
     )) /* IF_ENABLED(CONFIG_ZMK_SLEEP) */                                       \
+                                                                                \
+    /* APPLICATION-phase Mode 3 hardware test (runs after USB CDC ACM ready) */\
+    static int he_mode3_test_##n(void)                                          \
+    {                                                                           \
+        const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
+        if (!cfg->has_sleep_gpio || !cfg->has_wakeup_gpio) {                    \
+            LOG_INF("Mode3 test[" #n "]: no sleep/wakeup GPIOs, skip");         \
+            return 0;                                                           \
+        }                                                                       \
+        LOG_INF("Mode3 test[" #n "]: START - SLEEP=High for 10s");             \
+        gpio_pin_set_dt(&cfg->sleep_gpio, 1);                                   \
+        k_sleep(K_MSEC(50));  /* SC4823 stabilize */                            \
+        bool detected = false;                                                  \
+        for (int s = 0; s < 10; s++) {                                          \
+            /* Sample AWAKE pin 10x per second */                               \
+            bool low_seen = false;                                               \
+            for (int j = 0; j < 10; j++) {                                      \
+                int awake = gpio_pin_get_dt(&cfg->wakeup_gpio);                 \
+                if (awake == 0) { low_seen = true; detected = true; }           \
+                k_sleep(K_MSEC(100));                                           \
+            }                                                                   \
+            LOG_INF("Mode3[" #n "] t=%ds AWAKE_LOW=%d", s + 1, low_seen);      \
+        }                                                                       \
+        gpio_pin_set_dt(&cfg->sleep_gpio, 0);                                   \
+        LOG_INF("Mode3 test[" #n "]: END detected=%d SLEEP=Low", detected);    \
+        return 0;                                                               \
+    }                                                                           \
+    SYS_INIT(he_mode3_test_##n, APPLICATION, 99);                               \
                                                                                 \
     PM_DEVICE_DT_INST_DEFINE(n, he_kscan_pm_action_##n);                        \
                                                                                 \
