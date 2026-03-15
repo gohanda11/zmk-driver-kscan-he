@@ -657,8 +657,10 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     ZMK_SUBSCRIPTION(he_kscan_activity_##n, zmk_activity_state_changed);       \
     )) /* IF_ENABLED(CONFIG_ZMK_SLEEP) */                                       \
                                                                                 \
-    /* APPLICATION-phase P1.01 (AWAKE pin) voltage monitor test       */        \
-    /* Reads physical pin state: HIGH=≈3.3V (idle) / LOW=≈0V (AWAKE) */        \
+    /* APPLICATION-phase P1.01 (AWAKE pin) 3-phase diagnostic test       */     \
+    /* Phase 1: Mode 1 (SLEEP=Low) baseline - is pin pulled LOW?       */     \
+    /* Phase 2: Mode 3 (SLEEP=High) idle - should be HIGH if no press  */     \
+    /* Phase 3: Mode 3 press detection - press a key to see LOW        */     \
     static int he_awake_pin_test_##n(void)                                      \
     {                                                                           \
         const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
@@ -667,85 +669,138 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             LOG_INF("AWAKE test[" #n "]: no sleep/wakeup GPIOs, skip");         \
             return 0;                                                           \
         }                                                                       \
-        /* Helper: read physical pin state (ignores GPIO_ACTIVE_LOW) */         \
-        /* Returns 1=HIGH(≈3.3V, idle)  0=LOW(≈0V, SC4823 AWAKE!) */           \
         const struct device *wport = cfg->wakeup_gpio.port;                     \
         gpio_pin_t wpin = cfg->wakeup_gpio.pin;                                 \
+        gpio_port_value_t pval = 0;                                             \
+        int port_num = (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0;  \
                                                                                 \
-        /* Stop scan_work so MUX stops switching (critical for Mode 3) */       \
+        /* Wait for USB CDC serial console to enumerate */                      \
+        k_sleep(K_SECONDS(5));                                                  \
+                                                                                \
+        LOG_INF("========================================");                    \
+        LOG_INF("=== AWAKE PIN (P%d.%02d) TEST START ===", port_num, wpin);    \
+        LOG_INF("========================================");                    \
+                                                                                \
+        /* Stop scan_work so MUX stops switching */                             \
         k_work_cancel_delayable(&data->scan_work);                              \
         k_sleep(K_MSEC(20));                                                    \
         for (uint8_t i = 0; i < cfg->num_select; i++) {                         \
             gpio_pin_set_dt(&cfg->select_gpios[i], 0);                          \
         }                                                                       \
                                                                                 \
-        /* Read baseline (before SLEEP=High) */                                 \
-        gpio_port_value_t pval = 0;                                             \
-        gpio_port_get_raw(wport, &pval);                                        \
-        int phys_init = (pval >> wpin) & 1;                                     \
-        LOG_INF("AWAKE test[" #n "]: P%d.%02d baseline = %s (≈%s)",            \
-                (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,         \
-                wpin,                                                           \
-                phys_init ? "HIGH" : "LOW",                                     \
-                phys_init ? "3.3V" : "0V");                                     \
-                                                                                \
-        /* Set SLEEP=High → SC4823 enters Mode 3 (AWAKE monitoring) */         \
-        gpio_pin_set_dt(&cfg->sleep_gpio, 1);                                   \
-        k_sleep(K_MSEC(50));  /* SC4823 stabilize into Mode 3 */                \
-                                                                                \
-        /* Read immediately after SLEEP=High */                                 \
-        gpio_port_get_raw(wport, &pval);                                        \
-        int phys_after = (pval >> wpin) & 1;                                    \
-        LOG_INF("AWAKE test[" #n "]: After SLEEP=High: P%d.%02d = %s (≈%s)",  \
-                (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,         \
-                wpin,                                                           \
-                phys_after ? "HIGH" : "LOW",                                    \
-                phys_after ? "3.3V" : "0V  ← unexpected!");                    \
-        LOG_INF("AWAKE test[" #n "]: Monitoring 10s - PRESS A KEY NOW!");      \
-                                                                                \
-        /* Poll every 10ms; log every state change + 1s summary */              \
-        int prev_phys = phys_after;                                             \
-        int low_count = 0;                                                      \
-        for (int i = 0; i < 1000; i++) {                                        \
-            gpio_port_get_raw(wport, &pval);                                    \
-            int cur = (pval >> wpin) & 1;                                       \
-            /* Log on state change */                                           \
-            if (cur != prev_phys) {                                             \
-                LOG_INF("AWAKE[" #n "] t=%dms P%d.%02d → %s (≈%s) %s",        \
-                        i * 10,                                                 \
-                        (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0, \
-                        wpin,                                                   \
-                        cur ? "HIGH" : "LOW",                                   \
-                        cur ? "3.3V" : "0V",                                    \
-                        cur ? "released" : "SC4823 AWAKE DETECTED!");           \
-                prev_phys = cur;                                                \
-            }                                                                   \
-            if (!cur) { low_count++; }                                          \
-            /* 1-second summary */                                              \
-            if (i % 100 == 99) {                                                \
-                gpio_port_get_raw(wport, &pval);                                \
-                int now = (pval >> wpin) & 1;                                   \
-                LOG_INF("AWAKE[" #n "] t=%ds: P%d.%02d=%s low_samples=%d",    \
-                        (i + 1) / 100,                                          \
-                        (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0, \
-                        wpin,                                                   \
-                        now ? "HIGH(3.3V)" : "LOW(0V)!",                       \
-                        low_count);                                             \
-            }                                                                   \
-            k_sleep(K_MSEC(10));                                                \
-        }                                                                       \
-                                                                                \
+        /* ---- Phase 1: Mode 1 (SLEEP=Low) ---- */                            \
+        /* SC4823 AWAKE pin is INPUT in Mode 1. nRF pull-up drives it. */      \
+        /* If LOW here: pin is shorted to GND or wiring problem.       */      \
         gpio_pin_set_dt(&cfg->sleep_gpio, 0);                                   \
-        LOG_INF("AWAKE test[" #n "]: END SLEEP=Low. Total LOW samples=%d/1000",\
-                low_count);                                                     \
-        if (low_count == 0) {                                                   \
-            LOG_WRN("AWAKE test[" #n "]: P%d.%02d never went LOW.",            \
-                    (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,     \
-                    wpin);                                                      \
-            LOG_WRN("  → Check SC4823 AWAKE wiring to P%d.%02d",              \
-                    (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,     \
-                    wpin);                                                      \
+        k_sleep(K_MSEC(50));                                                    \
+                                                                                \
+        LOG_INF("[Phase 1] Mode 1 (SLEEP=Low): reading P%d.%02d for 3s...",    \
+                port_num, wpin);                                                 \
+        LOG_INF("  SC4823 AWAKE is INPUT in Mode 1 -> expect HIGH (pull-up)"); \
+        int ph1_high = 0, ph1_low = 0;                                          \
+        for (int i = 0; i < 300; i++) {                                          \
+            gpio_port_get_raw(wport, &pval);                                     \
+            if ((pval >> wpin) & 1) { ph1_high++; } else { ph1_low++; }         \
+            k_sleep(K_MSEC(10));                                                 \
         }                                                                       \
+        LOG_INF("[Phase 1] RESULT: HIGH=%d LOW=%d -> %s",                       \
+                ph1_high, ph1_low,                                               \
+                ph1_low == 0 ? "OK (pin is HIGH)" :                             \
+                ph1_high == 0 ? "BAD: pin stuck LOW! wiring issue?" :           \
+                "UNSTABLE: floating?");                                          \
+                                                                                \
+        /* ---- Phase 2: Mode 3 idle (no key press) ---- */                    \
+        /* SC4823 monitors VOUT every 12.5ms in Mode 3.                */      \
+        /* AWAKE should stay HIGH if no magnet displacement detected.  */      \
+        LOG_INF("[Phase 2] Mode 3 (SLEEP=High) idle: DO NOT press keys!");     \
+        LOG_INF("  Monitoring P%d.%02d for 5s -> expect HIGH", port_num, wpin);\
+        gpio_pin_set_dt(&cfg->sleep_gpio, 1);                                   \
+        k_sleep(K_MSEC(100));  /* wait for SC4823 Mode 3 entry */               \
+                                                                                \
+        int ph2_high = 0, ph2_low = 0;                                          \
+        int prev_phys = -1;                                                      \
+        for (int i = 0; i < 500; i++) {                                          \
+            gpio_port_get_raw(wport, &pval);                                     \
+            int cur = (pval >> wpin) & 1;                                       \
+            if (cur) { ph2_high++; } else { ph2_low++; }                        \
+            if (cur != prev_phys) {                                              \
+                LOG_INF("  t=%dms: P%d.%02d -> %s",                             \
+                        i * 10, port_num, wpin,                                  \
+                        cur ? "HIGH(idle)" : "LOW(AWAKE triggered!)");          \
+                prev_phys = cur;                                                 \
+            }                                                                   \
+            if (i % 100 == 99) {                                                 \
+                LOG_INF("  t=%ds: HIGH=%d LOW=%d", (i+1)/100, ph2_high, ph2_low); \
+            }                                                                   \
+            k_sleep(K_MSEC(10));                                                 \
+        }                                                                       \
+        LOG_INF("[Phase 2] RESULT: HIGH=%d LOW=%d -> %s",                       \
+                ph2_high, ph2_low,                                               \
+                ph2_low == 0 ? "OK (HIGH at idle)" :                            \
+                ph2_high == 0 ? "BAD: always LOW! sleep wake WILL FAIL" :       \
+                "MIXED: intermittent AWAKE trigger");                            \
+                                                                                \
+        /* ---- Phase 3: Mode 3 with key press ---- */                         \
+        /* Stay in Mode 3. User should press a key. AWAKE -> LOW.     */       \
+        LOG_INF("[Phase 3] Mode 3: PRESS AND HOLD a key NOW! (5s)");           \
+        LOG_INF("  Monitoring P%d.%02d -> expect LOW during press",            \
+                port_num, wpin);                                                 \
+                                                                                \
+        int ph3_high = 0, ph3_low = 0;                                          \
+        prev_phys = -1;                                                          \
+        for (int i = 0; i < 500; i++) {                                          \
+            gpio_port_get_raw(wport, &pval);                                     \
+            int cur = (pval >> wpin) & 1;                                       \
+            if (cur) { ph3_high++; } else { ph3_low++; }                        \
+            if (cur != prev_phys) {                                              \
+                LOG_INF("  t=%dms: P%d.%02d -> %s",                             \
+                        i * 10, port_num, wpin,                                  \
+                        cur ? "HIGH(released)" : "LOW(AWAKE=press!)");          \
+                prev_phys = cur;                                                 \
+            }                                                                   \
+            if (i % 100 == 99) {                                                 \
+                LOG_INF("  t=%ds: HIGH=%d LOW=%d", (i+1)/100, ph3_high, ph3_low); \
+            }                                                                   \
+            k_sleep(K_MSEC(10));                                                 \
+        }                                                                       \
+        LOG_INF("[Phase 3] RESULT: HIGH=%d LOW=%d -> %s",                       \
+                ph3_high, ph3_low,                                               \
+                ph3_low > 0 ? "OK (LOW detected = press works)" :              \
+                "BAD: never LOW! AWAKE not responding to key press");           \
+                                                                                \
+        /* Return to Mode 1 */                                                  \
+        gpio_pin_set_dt(&cfg->sleep_gpio, 0);                                   \
+                                                                                \
+        /* ---- Summary ---- */                                                 \
+        LOG_INF("========================================");                    \
+        LOG_INF("=== AWAKE PIN TEST SUMMARY ===");                             \
+        LOG_INF("  Phase 1 Mode1 (SLEEP=Low):  HIGH=%d LOW=%d", ph1_high, ph1_low); \
+        LOG_INF("  Phase 2 Mode3 idle:         HIGH=%d LOW=%d", ph2_high, ph2_low); \
+        LOG_INF("  Phase 3 Mode3 press:        HIGH=%d LOW=%d", ph3_high, ph3_low); \
+                                                                                \
+        bool wake_ok = (ph2_low == 0) && (ph3_low > 0);                        \
+        if (wake_ok) {                                                          \
+            LOG_INF("  >>> SLEEP WAKE: OK - can wake from System OFF");        \
+        } else {                                                                \
+            LOG_WRN("  >>> SLEEP WAKE: WILL FAIL");                            \
+            if (ph1_low > 0) {                                                  \
+                LOG_WRN("  P%d.%02d is LOW even in Mode 1:", port_num, wpin);  \
+                LOG_WRN("    -> Check wiring: pin may be shorted to GND");     \
+                LOG_WRN("    -> Or SC4823 AWAKE is open-drain pulling down");  \
+                LOG_WRN("    -> Try external 10k pull-up to 3.3V");            \
+            }                                                                   \
+            if (ph2_low > 0 && ph1_low == 0) {                                  \
+                LOG_WRN("  LOW in Mode 3 idle (no press) = SC4823 issue:");    \
+                LOG_WRN("    -> Magnet resting position too close to sensor"); \
+                LOG_WRN("    -> SC4823 VOUT baseline shift > 0.4V threshold"); \
+                LOG_WRN("    -> If multiple SC4823 share AWAKE, one bad IC");  \
+            }                                                                   \
+            if (ph3_low == 0) {                                                  \
+                LOG_WRN("  Never LOW even when pressing = AWAKE disconnected");\
+            }                                                                   \
+        }                                                                       \
+        LOG_INF("========================================");                    \
+                                                                                \
         /* Restart scanning */                                                  \
         k_work_reschedule(&data->scan_work, K_MSEC(cfg->scan_period_ms));       \
         return 0;                                                               \
