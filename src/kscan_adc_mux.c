@@ -302,10 +302,24 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
                 /* 9. Fire callback on state change */                          \
                 if (ks->pressed != was_pressed && data->callback) {             \
-                    LOG_DBG("key %d %s dist=%d",                               \
+                    /* VOUT(mV) from inverted 12-bit ADC (gain=1/6, ref=3.6V) */\
+                    uint32_t _vout_mv = (uint32_t)(ADC_MAX_VALUE -              \
+                        ks->adc_filtered) * 3600u / ADC_MAX_VALUE;              \
+                    uint32_t _vrest_mv = (uint32_t)(ADC_MAX_VALUE -             \
+                        ks->adc_rest) * 3600u / ADC_MAX_VALUE;                  \
+                    /* AWAKE raw state (Mode1: INPUT, should be HIGH always)  */\
+                    gpio_port_value_t _wp = 0;                                  \
+                    int _awake = -1;                                             \
+                    if (cfg->has_wakeup_gpio) {                                 \
+                        gpio_port_get_raw(cfg->wakeup_gpio.port, &_wp);         \
+                        _awake = (_wp >> cfg->wakeup_gpio.pin) & 1;             \
+                    }                                                           \
+                    LOG_INF("key %d %s dist=%d vout=%umV rest=%umV AWAKE=%s SLEEP=Low", \
                             key_idx,                                            \
                             ks->pressed ? "press" : "release",                 \
-                            ks->distance);                                      \
+                            ks->distance,                                       \
+                            _vout_mv, _vrest_mv,                                \
+                            _awake < 0 ? "N/A" : (_awake ? "H" : "L"));         \
                     scan_has_activity = true;                                   \
                     data->callback(data->dev, 0, key_idx, ks->pressed);         \
                 }                                                               \
@@ -545,28 +559,37 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         switch (action) {                                                       \
         case PM_DEVICE_ACTION_SUSPEND:                                          \
-            LOG_INF("HE kscan[" #n "]: PM_DEVICE_ACTION_SUSPEND"); \
+            LOG_INF("HE kscan[" #n "]: PM_DEVICE_ACTION_SUSPEND");             \
             /* Stop scanning */                                                 \
             k_work_cancel_delayable(&data->scan_work);                          \
                                                                                 \
-            /* SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */        \
+            /* Step 1: MUX→LOW first so SC4823 sees stable VOUT at rest */     \
+            for (uint8_t _i = 0; _i < cfg->num_select; _i++) {                  \
+                gpio_pin_set_dt(&cfg->select_gpios[_i], 0);                     \
+            }                                                                   \
+            k_sleep(K_MSEC(10));  /* let VOUT settle at addr=0 */               \
+                                                                                \
+            /* Step 2: SLEEP=High → SC4823 Mode 3 */                           \
             if (cfg->has_sleep_gpio) {                                          \
                 int ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);                 \
                 LOG_INF("HE kscan: SLEEP=High ret=%d", ret);                   \
             }                                                                   \
                                                                                 \
-            /* Configure AWAKE pin interrupt (SENSE_LOW) for System OFF wakeup */ \
-            if (cfg->has_wakeup_gpio) {                                         \
-                int _awake_now = gpio_pin_get_dt(&cfg->wakeup_gpio);            \
-                LOG_INF("HE kscan: AWAKE pin now=%d (expect 1=High)", _awake_now); \
-                int ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,    \
-                                                GPIO_INT_LEVEL_ACTIVE);         \
-                LOG_INF("HE kscan: AWAKE SENSE_LOW ret=%d", ret);              \
-            }                                                                   \
+            /* Step 3: Wait for SC4823 to complete ≥4 monitoring cycles */     \
+            /* (12.5ms × 4 = 50ms) so AWAKE reflects true idle state */        \
+            k_sleep(K_MSEC(50));                                                \
                                                                                 \
-            /* MUX select lines LOW (power saving) */                           \
-            for (uint8_t i = 0; i < cfg->num_select; i++) {                     \
-                gpio_pin_set_dt(&cfg->select_gpios[i], 0);                      \
+            /* Step 4: Read AWAKE stability before enabling SENSE_LOW */       \
+            if (cfg->has_wakeup_gpio) {                                         \
+                gpio_port_value_t _pval = 0;                                    \
+                gpio_port_get_raw(cfg->wakeup_gpio.port, &_pval);               \
+                int _awake_phys = (_pval >> cfg->wakeup_gpio.pin) & 1;          \
+                LOG_INF("HE kscan: AWAKE after 50ms = %s",                     \
+                        _awake_phys ? "HIGH(ok)" :                              \
+                        "LOW! vout<vq-0.4V: magnets shift VOUT or wiring issue"); \
+                int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,   \
+                                                GPIO_INT_LEVEL_ACTIVE);         \
+                LOG_INF("HE kscan: AWAKE SENSE_LOW ret=%d", _ret);             \
             }                                                                   \
             LOG_INF("HE kscan[" #n "]: suspended → sys_poweroff pending");     \
             return 0;                                                           \
@@ -622,7 +645,13 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
         int ret;                                                                \
                                                                                 \
-        /* SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */            \
+        /* Step 1: MUX→LOW first so SC4823 sees stable VOUT at rest */         \
+        for (uint8_t _i = 0; _i < cfg->num_select; _i++) {                      \
+            gpio_pin_set_dt(&cfg->select_gpios[_i], 0);                         \
+        }                                                                       \
+        k_sleep(K_MSEC(10));  /* let MUX output settle */                       \
+                                                                                \
+        /* Step 2: SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */    \
         if (cfg->has_sleep_gpio) {                                              \
             ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);                         \
             if (ret < 0) {                                                      \
@@ -634,17 +663,26 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             LOG_WRN("HE kscan[" #n "]: no sleep-gpios configured");             \
         }                                                                       \
                                                                                 \
-        /* SENSE_LOW on AWAKE pin for System OFF wakeup */                      \
+        /* Step 3: Wait for SC4823 to take ≥4 monitoring cycles (50ms) */      \
+        k_sleep(K_MSEC(50));                                                    \
+                                                                                \
+        /* Step 4: Check AWAKE; log result; enable SENSE_LOW for wakeup */     \
         if (cfg->has_wakeup_gpio) {                                             \
+            gpio_port_value_t _pval = 0;                                        \
+            gpio_port_get_raw(cfg->wakeup_gpio.port, &_pval);                   \
+            int _awake_phys = (_pval >> cfg->wakeup_gpio.pin) & 1;              \
+            LOG_INF("HE kscan[" #n "]: AWAKE after 50ms = %s (P%d.%02d)",     \
+                    _awake_phys ? "HIGH(ok)" :                                   \
+                    "LOW! VOUT<VQ-0.4V: magnets or wiring issue",               \
+                    (cfg->wakeup_gpio.port ==                                   \
+                     DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,              \
+                    cfg->wakeup_gpio.pin);                                      \
             ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,            \
                                                   GPIO_INT_LEVEL_ACTIVE);       \
             if (ret < 0) {                                                      \
                 LOG_ERR("HE kscan: AWAKE interrupt configure failed: %d", ret); \
             } else {                                                             \
-                LOG_INF("HE kscan[" #n "]: AWAKE SENSE_LOW set (P%d.%02d)",    \
-                        (cfg->wakeup_gpio.port ==                               \
-                         DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,          \
-                        cfg->wakeup_gpio.pin);                                  \
+                LOG_INF("HE kscan[" #n "]: AWAKE SENSE_LOW set");               \
             }                                                                   \
         } else {                                                                \
             LOG_WRN("HE kscan[" #n "]: no wakeup-gpios configured");            \
