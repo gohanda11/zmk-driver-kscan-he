@@ -23,9 +23,13 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
-#include <hal/nrf_gpio.h>
 
 #include "he_key_state.h"
+
+#if IS_ENABLED(CONFIG_ZMK_SLEEP)
+#include <zmk/activity.h>
+#include <zmk/events/activity_state_changed.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -548,13 +552,10 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                 gpio_pin_set_dt(&cfg->sleep_gpio, 1);                           \
             }                                                                   \
                                                                                 \
-            /* Set SENSE_LOW on AWAKE pin for System OFF wakeup */              \
+            /* Configure AWAKE pin interrupt (SENSE_LOW) for System OFF wakeup */ \
             if (cfg->has_wakeup_gpio) {                                         \
-                uint32_t abs_pin = NRF_GPIO_PIN_MAP(                            \
-                    (cfg->wakeup_gpio.port ==                                   \
-                     DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0,              \
-                    cfg->wakeup_gpio.pin);                                      \
-                nrf_gpio_cfg_sense_set(abs_pin, NRF_GPIO_PIN_SENSE_LOW);        \
+                gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,              \
+                                                GPIO_INT_LEVEL_ACTIVE);         \
             }                                                                   \
                                                                                 \
             /* MUX select lines LOW (power saving) */                           \
@@ -568,6 +569,12 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             /* SLEEP=Low → SC4823 normal operation (<5us recovery) */          \
             if (cfg->has_sleep_gpio) {                                          \
                 gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
+            }                                                                   \
+                                                                                \
+            /* Disable AWAKE interrupt (SENSE_LOW no longer needed) */          \
+            if (cfg->has_wakeup_gpio) {                                         \
+                gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,              \
+                                                GPIO_INT_DISABLE);              \
             }                                                                   \
                                                                                 \
             /* Re-calibrate after wakeup */                                     \
@@ -586,6 +593,41 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             return -ENOTSUP;                                                    \
         }                                                                       \
     }                                                                           \
+                                                                                \
+    /* --------------------------------------------------------------- */       \
+    /* ZMK activity listener: configure wakeup on idle sleep path    */       \
+    /* (zmk_pm_suspend_devices skips wakeup-enabled kscan devices,  */       \
+    /*  so PM_DEVICE_ACTION_SUSPEND is not called for idle sleep.    */       \
+    /* This listener fires synchronously before sys_poweroff().)     */       \
+    /* --------------------------------------------------------------- */       \
+    IF_ENABLED(CONFIG_ZMK_SLEEP, (                                              \
+    static int he_kscan_activity_event_##n(const zmk_event_t *eh)               \
+    {                                                                           \
+        const struct zmk_activity_state_changed *ev =                           \
+            as_zmk_activity_state_changed(eh);                                  \
+        if (ev == NULL || ev->state != ZMK_ACTIVITY_SLEEP) {                    \
+            return ZMK_EV_EVENT_BUBBLE;                                         \
+        }                                                                       \
+                                                                                \
+        const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
+                                                                                \
+        /* SLEEP=High → SC4823 Mode 3 (active wakeup monitoring) */            \
+        if (cfg->has_sleep_gpio) {                                              \
+            gpio_pin_set_dt(&cfg->sleep_gpio, 1);                               \
+        }                                                                       \
+                                                                                \
+        /* SENSE_LOW on AWAKE pin for System OFF wakeup */                      \
+        if (cfg->has_wakeup_gpio) {                                             \
+            gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,                  \
+                                            GPIO_INT_LEVEL_ACTIVE);             \
+        }                                                                       \
+                                                                                \
+        LOG_INF("HE kscan: SC4823 Mode 3 wakeup configured for idle sleep");   \
+        return ZMK_EV_EVENT_BUBBLE;                                             \
+    }                                                                           \
+    ZMK_LISTENER(he_kscan_activity_##n, he_kscan_activity_event_##n);          \
+    ZMK_SUBSCRIPTION(he_kscan_activity_##n, zmk_activity_state_changed);       \
+    )) /* IF_ENABLED(CONFIG_ZMK_SLEEP) */                                       \
                                                                                 \
     PM_DEVICE_DT_INST_DEFINE(n, he_kscan_pm_action_##n);                        \
                                                                                 \
