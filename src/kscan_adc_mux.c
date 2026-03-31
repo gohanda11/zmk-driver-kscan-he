@@ -28,6 +28,7 @@
 
 #include "he_key_state.h"
 #include "zmk_kscan_he_api.h"
+#include "zmk_kscan_he_private.h"
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -588,10 +589,16 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
     {                                                                           \
         struct he_kscan_data_##n *data = &he_data_##n;                          \
         const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
-        if (strcmp(key, "thresholds") != 0) {                                    \
+        const char *next;                                                       \
+        if (!settings_name_steq(key, "thresholds", &next) || next) {            \
             return -ENOENT;                                                     \
         }                                                                       \
         uint8_t buf[INST_NUM_KEYS(n) * 2];                                      \
+        if (len != sizeof(buf)) {                                               \
+            LOG_WRN("he_kscan/%d: thresholds size mismatch "                    \
+                    "(got %zu, expected %zu)", n, len, sizeof(buf));             \
+            return -EINVAL;                                                     \
+        }                                                                       \
         ssize_t rc = read_cb(cb_arg, buf, sizeof(buf));                         \
         if (rc < 0 || (size_t)rc != sizeof(buf)) {                              \
             return 0;                                                           \
@@ -640,7 +647,11 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
                                                                                 \
     static int he_recalibrate_##n(const struct device *dev)                     \
     {                                                                           \
+        struct he_kscan_data_##n *data = dev->data;                             \
+        const struct he_kscan_cfg_##n *cfg = dev->config;                       \
+        k_work_cancel_delayable(&data->scan_work);                              \
         he_calibrate_##n(dev);                                                  \
+        k_work_reschedule(&data->scan_work, K_MSEC(cfg->scan_period_ms));       \
         return 0;                                                               \
     }                                                                           \
                                                                                 \
