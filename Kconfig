@@ -7,9 +7,19 @@ config ZMK_KSCAN_ADC_MUX
     default $(dt_compat_enabled,$(DT_COMPAT_ZMK_KSCAN_ADC_MUX))
     select ADC
     select GPIO
+    select SETTINGS
     select PM_DEVICE if ZMK_SLEEP
     help
       Enable the Hall Effect keyboard scanner driver using
       SN74LV4051A analog multiplexers and SAADC.
       Reads GH39FKSW Hall Effect sensor values and converts
       to ZMK key press/release events.
+
+config ZMK_KSCAN_HE_CONFIGURABLE_THRESHOLDS
+    bool "Runtime-configurable per-key thresholds for HE kscan"
+    default y
+    depends on ZMK_KSCAN_ADC_MUX
+    help
+      Enable per-key threshold arrays and the zmk_kscan_he_api public API.
+      Thresholds can be changed at runtime and persisted to NVS via
+      Zephyr settings subsystem.

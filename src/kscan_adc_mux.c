@@ -23,8 +23,11 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/settings/settings.h>
+#include <string.h>
 
 #include "he_key_state.h"
+#include "zmk_kscan_he_api.h"
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -103,6 +106,116 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     for (uint8_t i = 0; i < num_sel; i++) {
         gpio_pin_set_dt(&sel[i], (addr >> i) & 1u);
     }
+}
+
+/* -----------------------------------------------------------------------
+ * Public API: device registry and accessor functions
+ *
+ * The driver uses macro-based per-instance expansion, so we use a vtable
+ * registry to bridge between the generic API and instance-specific data.
+ * ----------------------------------------------------------------------- */
+
+#define HE_KSCAN_MAX_DEVICES 2
+
+static struct {
+    const struct device *dev;
+    struct he_kscan_api_vtable vtable;
+} he_registry[HE_KSCAN_MAX_DEVICES];
+static int he_registry_count = 0;
+
+static struct he_kscan_api_vtable *find_vtable(const struct device *dev) {
+    for (int i = 0; i < he_registry_count; i++) {
+        if (he_registry[i].dev == dev) {
+            return &he_registry[i].vtable;
+        }
+    }
+    return NULL;
+}
+
+void zmk_kscan_he_register_device(const struct device *dev,
+                                   struct he_kscan_api_vtable *vtable) {
+    if (he_registry_count < HE_KSCAN_MAX_DEVICES) {
+        he_registry[he_registry_count].dev = dev;
+        he_registry[he_registry_count].vtable = *vtable;
+        he_registry_count++;
+    }
+}
+
+int zmk_kscan_he_get_threshold(const struct device *dev, uint8_t key_idx,
+                                uint8_t *press_out, uint8_t *release_out) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt || key_idx >= vt->num_keys || !press_out || !release_out) {
+        return -EINVAL;
+    }
+    *press_out   = vt->press_thresholds[key_idx];
+    *release_out = vt->release_thresholds[key_idx];
+    return 0;
+}
+
+int zmk_kscan_he_set_threshold(const struct device *dev, uint8_t key_idx,
+                                uint8_t press, uint8_t release) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt || key_idx >= vt->num_keys || release >= press) {
+        return -EINVAL;
+    }
+    vt->press_thresholds[key_idx]   = press;
+    vt->release_thresholds[key_idx] = release;
+    return 0;
+}
+
+int zmk_kscan_he_get_adc_raw(const struct device *dev, uint8_t key_idx,
+                              uint16_t *adc_out, uint8_t *distance_out) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt || key_idx >= vt->num_keys) {
+        return -EINVAL;
+    }
+    if (adc_out)      { *adc_out      = vt->keys[key_idx].adc_filtered; }
+    if (distance_out) { *distance_out = vt->keys[key_idx].distance; }
+    return 0;
+}
+
+int zmk_kscan_he_get_calibration(const struct device *dev, uint8_t key_idx,
+                                  uint16_t *rest_out, uint16_t *bottom_out) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt || key_idx >= vt->num_keys) {
+        return -EINVAL;
+    }
+    if (rest_out)   { *rest_out   = vt->keys[key_idx].adc_rest; }
+    if (bottom_out) { *bottom_out = vt->keys[key_idx].adc_bottom; }
+    return 0;
+}
+
+int zmk_kscan_he_get_num_keys(const struct device *dev, uint8_t *num_keys_out) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt || !num_keys_out) {
+        return -EINVAL;
+    }
+    *num_keys_out = vt->num_keys;
+    return 0;
+}
+
+int zmk_kscan_he_save_settings(const struct device *dev) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt) {
+        return -EINVAL;
+    }
+    return vt->save_settings(dev);
+}
+
+int zmk_kscan_he_reset_defaults(const struct device *dev) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt) {
+        return -EINVAL;
+    }
+    return vt->reset_defaults(dev);
+}
+
+int zmk_kscan_he_recalibrate(const struct device *dev) {
+    struct he_kscan_api_vtable *vt = find_vtable(dev);
+    if (!vt) {
+        return -EINVAL;
+    }
+    return vt->recalibrate(dev);
 }
 
 /* -----------------------------------------------------------------------
@@ -190,6 +303,8 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         int64_t              last_activity_ms;                                  \
         bool                 idle_mode;                                         \
         uint32_t             scan_count;                                        \
+        uint8_t              press_thresholds[INST_NUM_KEYS(n)];                \
+        uint8_t              release_thresholds[INST_NUM_KEYS(n)];              \
     };                                                                          \
                                                                                 \
     static struct he_kscan_data_##n he_data_##n;
@@ -283,9 +398,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                 /*    of the last state change to prevent rapid bouncing.  */  \
                 bool was_pressed = ks->pressed;                                 \
                 bool want_press = (!ks->pressed &&                              \
-                                   ks->distance >= cfg->press_threshold);       \
+                                   ks->distance >= data->press_thresholds[key_idx]); \
                 bool want_release = (ks->pressed &&                             \
-                                     ks->distance <= cfg->release_threshold);   \
+                                     ks->distance <= data->release_thresholds[key_idx]); \
                                                                                 \
                 if (want_press || want_release) {                               \
                     int64_t since = now - ks->last_transition_ms;               \
@@ -465,6 +580,71 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     }                                                                           \
                                                                                 \
     /* --------------------------------------------------------------- */       \
+    /* NVS settings: load/save per-key thresholds                       */       \
+    /* Blob format: [press_0, release_0, press_1, release_1, ...]       */       \
+    /* --------------------------------------------------------------- */       \
+    static int he_settings_set_##n(const char *key, size_t len,                 \
+                                    settings_read_cb read_cb, void *cb_arg)      \
+    {                                                                           \
+        struct he_kscan_data_##n *data = &he_data_##n;                          \
+        const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
+        if (strcmp(key, "thresholds") != 0) {                                    \
+            return -ENOENT;                                                     \
+        }                                                                       \
+        uint8_t buf[INST_NUM_KEYS(n) * 2];                                      \
+        ssize_t rc = read_cb(cb_arg, buf, sizeof(buf));                         \
+        if (rc < 0 || (size_t)rc != sizeof(buf)) {                              \
+            return 0;                                                           \
+        }                                                                       \
+        for (uint8_t k = 0; k < cfg->num_keys; k++) {                           \
+            uint8_t p = buf[k * 2];                                             \
+            uint8_t r = buf[k * 2 + 1];                                         \
+            if (p > r && p > 0) {                                               \
+                data->press_thresholds[k]   = p;                                \
+                data->release_thresholds[k] = r;                                \
+            }                                                                   \
+        }                                                                       \
+        return 0;                                                               \
+    }                                                                           \
+                                                                                \
+    SETTINGS_STATIC_HANDLER_DEFINE(he_kscan_settings_##n,                       \
+        "he_kscan/" #n,                                                         \
+        NULL,                                                                   \
+        he_settings_set_##n,                                                    \
+        NULL,                                                                   \
+        NULL);                                                                  \
+                                                                                \
+    static int he_save_settings_##n(const struct device *dev)                   \
+    {                                                                           \
+        struct he_kscan_data_##n *data = dev->data;                             \
+        const struct he_kscan_cfg_##n *cfg = dev->config;                       \
+        uint8_t buf[INST_NUM_KEYS(n) * 2];                                      \
+        for (uint8_t k = 0; k < cfg->num_keys; k++) {                           \
+            buf[k * 2]     = data->press_thresholds[k];                         \
+            buf[k * 2 + 1] = data->release_thresholds[k];                       \
+        }                                                                       \
+        return settings_save_one("he_kscan/" #n "/thresholds",                  \
+                                 buf, sizeof(buf));                             \
+    }                                                                           \
+                                                                                \
+    static int he_reset_defaults_##n(const struct device *dev)                  \
+    {                                                                           \
+        struct he_kscan_data_##n *data = dev->data;                             \
+        const struct he_kscan_cfg_##n *cfg = dev->config;                       \
+        for (uint8_t k = 0; k < cfg->num_keys; k++) {                           \
+            data->press_thresholds[k]   = cfg->press_threshold;                 \
+            data->release_thresholds[k] = cfg->release_threshold;               \
+        }                                                                       \
+        return he_save_settings_##n(dev);                                       \
+    }                                                                           \
+                                                                                \
+    static int he_recalibrate_##n(const struct device *dev)                     \
+    {                                                                           \
+        he_calibrate_##n(dev);                                                  \
+        return 0;                                                               \
+    }                                                                           \
+                                                                                \
+    /* --------------------------------------------------------------- */       \
     /* Device init                                                      */       \
     /* --------------------------------------------------------------- */       \
     static int he_kscan_init_##n(const struct device *dev)                      \
@@ -532,8 +712,30 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         data->idle_mode = false;                                                \
         data->scan_count = 0;                                                   \
                                                                                 \
+        /* Initialize per-key thresholds from devicetree defaults */            \
+        for (uint8_t k = 0; k < cfg->num_keys; k++) {                           \
+            data->press_thresholds[k]   = cfg->press_threshold;                 \
+            data->release_thresholds[k] = cfg->release_threshold;               \
+        }                                                                       \
+                                                                                \
         /* Run initial calibration (blocking, ~500ms) */                        \
         he_calibrate_##n(dev);                                                  \
+                                                                                \
+        /* Register with public API */                                          \
+        {                                                                       \
+            struct he_kscan_api_vtable _vt = {                                  \
+                .num_keys          = cfg->num_keys,                             \
+                .default_press     = cfg->press_threshold,                      \
+                .default_release   = cfg->release_threshold,                    \
+                .press_thresholds  = data->press_thresholds,                    \
+                .release_thresholds = data->release_thresholds,                 \
+                .keys              = data->keys,                                \
+                .save_settings     = he_save_settings_##n,                      \
+                .reset_defaults    = he_reset_defaults_##n,                     \
+                .recalibrate       = he_recalibrate_##n,                        \
+            };                                                                  \
+            zmk_kscan_he_register_device(dev, &_vt);                            \
+        }                                                                       \
                                                                                 \
         LOG_INF("HE20 kscan driver initialized (%d keys) uptime=%lldms",        \
                 cfg->num_keys, k_uptime_get());                                 \
