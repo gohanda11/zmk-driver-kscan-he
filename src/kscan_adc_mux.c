@@ -769,9 +769,39 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
         case PM_DEVICE_ACTION_SUSPEND:                                          \
             LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
+            /* SC4823 → Mode 3: SLEEP=HIGH で磁気変化監視モードに移行 */        \
+            if (cfg->has_sleep_gpio) {                                          \
+                int _ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);               \
+                if (_ret < 0) {                                                 \
+                    LOG_ERR("HE kscan[" #n "]: sleep GPIO failed: %d", _ret); \
+                    return _ret;                                                \
+                }                                                               \
+            }                                                                   \
+            /* nRF52840 GPIO SENSE: AWAKE=LOW (active-low) で復帰可能に */      \
+            if (cfg->has_wakeup_gpio) {                                         \
+                int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,  \
+                                                GPIO_INT_LEVEL_LOW);           \
+                if (_ret < 0) {                                                 \
+                    LOG_ERR("HE kscan[" #n "]: wakeup GPIO failed: %d", _ret);\
+                    if (cfg->has_sleep_gpio) {                                  \
+                        gpio_pin_set_dt(&cfg->sleep_gpio, 0);                  \
+                    }                                                           \
+                    return _ret;                                                \
+                }                                                               \
+            }                                                                   \
             return 0;                                                           \
                                                                                 \
         case PM_DEVICE_ACTION_RESUME:                                           \
+            /* wakeup 割り込み解除 */                                            \
+            if (cfg->has_wakeup_gpio) {                                         \
+                gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,              \
+                                                GPIO_INT_DISABLE);               \
+            }                                                                   \
+            /* SC4823 → Mode 1: SLEEP=LOW で通常動作復帰 */                     \
+            if (cfg->has_sleep_gpio) {                                          \
+                gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
+                k_sleep(K_MSEC(5));                                             \
+            }                                                                   \
             /* Re-calibrate and restart scanning */                             \
             he_calibrate_##n(dev);                                              \
             data->last_activity_ms = k_uptime_get();                            \
