@@ -773,23 +773,42 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
             if (cfg->has_sleep_gpio) {                                          \
                 int _ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);               \
                 if (_ret < 0) {                                                 \
-                    LOG_ERR("HE kscan[" #n "]: sleep GPIO failed: %d", _ret); \
-                    return _ret;                                                \
+                    LOG_WRN("HE kscan[" #n "]: sleep GPIO err: %d "            \
+                            "(continuing)", _ret);                             \
                 }                                                               \
             }                                                                   \
-            /* nRF52840 GPIO SENSE: AWAKE=LOW (active-low) で復帰可能に */      \
+            /* nRF52840 GPIO SENSE: AWAKE=LOW で System OFF 復帰可能に */       \
+            /* SC4823 が Mode 3 へ移行するまで待機 */                           \
+            if (cfg->has_sleep_gpio) {                                          \
+                k_sleep(K_MSEC(10));                                            \
+            }                                                                   \
             if (cfg->has_wakeup_gpio) {                                         \
-                int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,  \
-                                                GPIO_INT_LEVEL_LOW);           \
-                if (_ret < 0) {                                                 \
-                    LOG_ERR("HE kscan[" #n "]: wakeup GPIO failed: %d", _ret);\
-                    if (cfg->has_sleep_gpio) {                                  \
-                        gpio_pin_set_dt(&cfg->sleep_gpio, 0);                  \
+                int awake_state = gpio_pin_get_dt(&cfg->wakeup_gpio);          \
+                if (awake_state < 0) {                                          \
+                    /* Read error → ベストエフォートで arm */                   \
+                    LOG_WRN("HE kscan[" #n "]: cannot read AWAKE GPIO: %d "    \
+                            "(arming anyway)", awake_state);                    \
+                    int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,\
+                                                    GPIO_INT_LEVEL_LOW);        \
+                    if (_ret < 0) {                                             \
+                        LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "       \
+                                "(continuing)", _ret);                          \
                     }                                                           \
-                    return _ret;                                                \
+                } else if (awake_state > 0) {                                   \
+                    /* AWAKE already active (physical LOW) → skip to avoid immediate wakeup */ \
+                    LOG_WRN("HE kscan[" #n "]: AWAKE already active at suspend, "\
+                            "skipping SENSE arm");                               \
+                } else {                                                        \
+                    /* AWAKE idle (physical HIGH) → safe to arm GPIO SENSE */   \
+                    int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,\
+                                                    GPIO_INT_LEVEL_LOW);        \
+                    if (_ret < 0) {                                             \
+                        LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "       \
+                                "(continuing)", _ret);                          \
+                    }                                                           \
                 }                                                               \
             }                                                                   \
-            return 0;                                                           \
+            return 0;\
                                                                                 \
         case PM_DEVICE_ACTION_RESUME:                                           \
             /* wakeup 割り込み解除 */                                            \
