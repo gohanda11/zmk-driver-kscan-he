@@ -789,13 +789,13 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
                 LOG_INF("HE kscan[" #n "]: AWAKE=%s before SENSE arm",         \
                         _awake ? "H" : "L");                                    \
                 int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,  \
-                                                GPIO_INT_LEVEL_LOW);           \
+                                                GPIO_INT_LEVEL_ACTIVE);        \
                 if (_ret < 0) {                                                 \
                     LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "           \
                             "(continuing)", _ret);                              \
                 } else {                                                        \
-                    LOG_INF("HE kscan[" #n "]: SENSE armed (GPIO_INT_LEVEL_LOW)");\
-                }                                                               \
+                    LOG_INF("HE kscan[" #n "]: SENSE armed (GPIO_INT_LEVEL_ACTIVE = phys LOW)");\
+                }\
             }                                                                   \
             /* SC4823 → Mode 3: SLEEP=HIGH で磁気変化監視モードに移行 */        \
             if (cfg->has_sleep_gpio) {                                          \
