@@ -780,32 +780,19 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
             /* nRF52840 GPIO SENSE: AWAKE=LOW で System OFF 復帰可能に */       \
             /* SC4823 が Mode 3 へ移行するまで待機 */                           \
             if (cfg->has_sleep_gpio) {                                          \
-                k_sleep(K_MSEC(10));                                            \
+                k_sleep(K_MSEC(50));                                            \
             }                                                                   \
             if (cfg->has_wakeup_gpio) {                                         \
-                int awake_state = gpio_pin_get_dt(&cfg->wakeup_gpio);          \
-                if (awake_state < 0) {                                          \
-                    /* Read error → ベストエフォートで arm */                   \
-                    LOG_WRN("HE kscan[" #n "]: cannot read AWAKE GPIO: %d "    \
-                            "(arming anyway)", awake_state);                    \
-                    int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,\
-                                                    GPIO_INT_LEVEL_LOW);        \
-                    if (_ret < 0) {                                             \
-                        LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "       \
-                                "(continuing)", _ret);                          \
-                    }                                                           \
-                } else if (awake_state > 0) {                                   \
-                    /* AWAKE already active (physical LOW) → skip to avoid immediate wakeup */ \
-                    LOG_WRN("HE kscan[" #n "]: AWAKE already active at suspend, "\
-                            "skipping SENSE arm");                               \
+                /* AWAKE pre-check なし: 常に GPIO SENSE を arm する */         \
+                /* SC4823 が Mode 3 移行中に AWAKE を誤アサートする可能性があり  \
+                 * pre-check で false positive が発生すると wakeup 不能になる */ \
+                int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,  \
+                                                GPIO_INT_LEVEL_LOW);           \
+                if (_ret < 0) {                                                 \
+                    LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "           \
+                            "(continuing)", _ret);                              \
                 } else {                                                        \
-                    /* AWAKE idle (physical HIGH) → safe to arm GPIO SENSE */   \
-                    int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,\
-                                                    GPIO_INT_LEVEL_LOW);        \
-                    if (_ret < 0) {                                             \
-                        LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "       \
-                                "(continuing)", _ret);                          \
-                    }                                                           \
+                    LOG_INF("HE kscan[" #n "]: SENSE armed (GPIO_INT_LEVEL_LOW)");\
                 }                                                               \
             }                                                                   \
             return 0;\
