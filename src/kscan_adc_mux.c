@@ -303,6 +303,7 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
         int16_t              adc_buf[INST_NUM_ADC(n)];                          \
         int64_t              last_activity_ms;                                  \
         bool                 idle_mode;                                         \
+        bool                 sleep_active; /* SC4823 SLEEP=HIGH (Mode 3) */     \
         uint32_t             scan_count;                                        \
         uint8_t              press_thresholds[INST_NUM_KEYS(n)];                \
         uint8_t              release_thresholds[INST_NUM_KEYS(n)];              \
@@ -452,16 +453,25 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
         /* Periodic diagnostic logging (every 250 scans ≈ 1 second at 4ms) */  \
         data->scan_count++;                                                     \
         if (data->scan_count % 250 == 0) {                                      \
-            /* Log key 17 (LALT) and key 20 (LCTRL) state */                   \
+            /* AWAKE raw GPIO read */                                            \
+            gpio_port_value_t _wp = 0;                                          \
+            int _awake = -1;                                                    \
+            if (cfg->has_wakeup_gpio) {                                         \
+                gpio_port_get_raw(cfg->wakeup_gpio.port, &_wp);                 \
+                _awake = (_wp >> cfg->wakeup_gpio.pin) & 1;                     \
+            }                                                                   \
+            /* Log key 17 and key 20 state with AWAKE/SLEEP GPIO state */       \
             if (17 < cfg->num_keys && 20 < cfg->num_keys) {                     \
-                LOG_INF("DIAG [%u] k17: filt=%4u rest=%4u bot=%4u dist=%3u p=%d | k20: filt=%4u rest=%4u bot=%4u dist=%3u p=%d", \
+                LOG_INF("DIAG [%u] k17: filt=%4u rest=%4u bot=%4u dist=%3u p=%d | k20: filt=%4u rest=%4u bot=%4u dist=%3u p=%d | AWAKE=%s SLEEP=%s", \
                     (uint32_t)(data->scan_count / 250),                         \
                     data->keys[17].adc_filtered, data->keys[17].adc_rest,       \
                     data->keys[17].adc_bottom, data->keys[17].distance,         \
                     data->keys[17].pressed,                                     \
                     data->keys[20].adc_filtered, data->keys[20].adc_rest,       \
                     data->keys[20].adc_bottom, data->keys[20].distance,         \
-                    data->keys[20].pressed);                                    \
+                    data->keys[20].pressed,                                     \
+                    _awake < 0 ? "N/A" : (_awake ? "H" : "L"),                 \
+                    data->sleep_active ? "H" : "L");                            \
             }                                                                   \
         }                                                                       \
                                                                                 \
@@ -775,6 +785,8 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
                 if (_ret < 0) {                                                 \
                     LOG_WRN("HE kscan[" #n "]: sleep GPIO err: %d "            \
                             "(continuing)", _ret);                             \
+                } else {                                                        \
+                    data->sleep_active = true;                                  \
                 }                                                               \
             }                                                                   \
             /* nRF52840 GPIO SENSE: AWAKE=LOW で System OFF 復帰可能に */       \
@@ -786,6 +798,11 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
                 /* AWAKE pre-check なし: 常に GPIO SENSE を arm する */         \
                 /* SC4823 が Mode 3 移行中に AWAKE を誤アサートする可能性があり  \
                  * pre-check で false positive が発生すると wakeup 不能になる */ \
+                gpio_port_value_t _wp = 0;                                      \
+                gpio_port_get_raw(cfg->wakeup_gpio.port, &_wp);                 \
+                int _awake = (_wp >> cfg->wakeup_gpio.pin) & 1;                 \
+                LOG_INF("HE kscan[" #n "]: AWAKE=%s before SENSE arm",         \
+                        _awake ? "H" : "L");                                    \
                 int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,  \
                                                 GPIO_INT_LEVEL_LOW);           \
                 if (_ret < 0) {                                                 \
@@ -806,6 +823,7 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
             /* SC4823 → Mode 1: SLEEP=LOW で通常動作復帰 */                     \
             if (cfg->has_sleep_gpio) {                                          \
                 gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
+                data->sleep_active = false;                                     \
                 k_sleep(K_MSEC(5));                                             \
             }                                                                   \
             /* Re-calibrate and restart scanning */                             \
