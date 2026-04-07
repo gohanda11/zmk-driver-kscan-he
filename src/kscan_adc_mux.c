@@ -779,25 +779,10 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
         case PM_DEVICE_ACTION_SUSPEND:                                          \
             LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
-            /* SC4823 → Mode 3: SLEEP=HIGH で磁気変化監視モードに移行 */        \
-            if (cfg->has_sleep_gpio) {                                          \
-                int _ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);               \
-                if (_ret < 0) {                                                 \
-                    LOG_WRN("HE kscan[" #n "]: sleep GPIO err: %d "            \
-                            "(continuing)", _ret);                             \
-                } else {                                                        \
-                    data->sleep_active = true;                                  \
-                }                                                               \
-            }                                                                   \
-            /* nRF52840 GPIO SENSE: AWAKE=LOW で System OFF 復帰可能に */       \
-            /* SC4823 が Mode 3 へ移行するまで待機 */                           \
-            if (cfg->has_sleep_gpio) {                                          \
-                k_sleep(K_MSEC(50));                                            \
-            }                                                                   \
+            /* nRF52840 GPIO SENSE を先に arm する (SC4823 はまだ Mode 1 →     \
+             * AWAKE=H 確実) USB が 50ms 待機中にサスペンドされてもログが届く  \
+             * ようにするため、SENSE arm をスリープ設定より前に実行する。 */    \
             if (cfg->has_wakeup_gpio) {                                         \
-                /* AWAKE pre-check なし: 常に GPIO SENSE を arm する */         \
-                /* SC4823 が Mode 3 移行中に AWAKE を誤アサートする可能性があり  \
-                 * pre-check で false positive が発生すると wakeup 不能になる */ \
                 gpio_port_value_t _wp = 0;                                      \
                 gpio_port_get_raw(cfg->wakeup_gpio.port, &_wp);                 \
                 int _awake = (_wp >> cfg->wakeup_gpio.pin) & 1;                 \
@@ -811,6 +796,20 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
                 } else {                                                        \
                     LOG_INF("HE kscan[" #n "]: SENSE armed (GPIO_INT_LEVEL_LOW)");\
                 }                                                               \
+            }                                                                   \
+            /* SC4823 → Mode 3: SLEEP=HIGH で磁気変化監視モードに移行 */        \
+            if (cfg->has_sleep_gpio) {                                          \
+                int _ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);               \
+                if (_ret < 0) {                                                 \
+                    LOG_WRN("HE kscan[" #n "]: sleep GPIO err: %d "            \
+                            "(continuing)", _ret);                             \
+                } else {                                                        \
+                    data->sleep_active = true;                                  \
+                }                                                               \
+            }                                                                   \
+            /* Mode 3 安定化待機 (SC4823 が監視サイクルを開始するまで) */        \
+            if (cfg->has_sleep_gpio) {                                          \
+                k_sleep(K_MSEC(50));                                            \
             }                                                                   \
             return 0;\
                                                                                 \
