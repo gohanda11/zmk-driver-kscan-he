@@ -779,25 +779,14 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
         case PM_DEVICE_ACTION_SUSPEND:                                          \
             LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
-            /* nRF52840 GPIO SENSE を先に arm する (SC4823 はまだ Mode 1 →     \
-             * AWAKE=H 確実) USB が 50ms 待機中にサスペンドされてもログが届く  \
-             * ようにするため、SENSE arm をスリープ設定より前に実行する。 */    \
-            if (cfg->has_wakeup_gpio) {                                         \
-                gpio_port_value_t _wp = 0;                                      \
-                gpio_port_get_raw(cfg->wakeup_gpio.port, &_wp);                 \
-                int _awake = (_wp >> cfg->wakeup_gpio.pin) & 1;                 \
-                LOG_INF("HE kscan[" #n "]: AWAKE=%s before SENSE arm",         \
-                        _awake ? "H" : "L");                                    \
-                int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,  \
-                                                GPIO_INT_LEVEL_ACTIVE);        \
-                if (_ret < 0) {                                                 \
-                    LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "           \
-                            "(continuing)", _ret);                              \
-                } else {                                                        \
-                    LOG_INF("HE kscan[" #n "]: SENSE armed (GPIO_INT_LEVEL_ACTIVE = phys LOW)");\
-                }\
-            }                                                                   \
             /* SC4823 → Mode 3: SLEEP=HIGH で磁気変化監視モードに移行 */        \
+            if (cfg->has_wakeup_gpio) {                                         \
+                gpio_port_value_t _wp0 = 0;                                     \
+                gpio_port_get_raw(cfg->wakeup_gpio.port, &_wp0);                \
+                int _a0 = (_wp0 >> cfg->wakeup_gpio.pin) & 1;                   \
+                LOG_INF("HE kscan[" #n "]: AWAKE=%s before Mode3",             \
+                        _a0 ? "H" : "L");                                       \
+            }                                                                   \
             if (cfg->has_sleep_gpio) {                                          \
                 int _ret = gpio_pin_set_dt(&cfg->sleep_gpio, 1);               \
                 if (_ret < 0) {                                                 \
@@ -805,11 +794,28 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
                             "(continuing)", _ret);                             \
                 } else {                                                        \
                     data->sleep_active = true;                                  \
+                    LOG_INF("HE kscan[" #n "]: SLEEP=H (Mode3)");              \
                 }                                                               \
             }                                                                   \
-            /* Mode 3 安定化待機 (SC4823 が監視サイクルを開始するまで) */        \
+            /* Mode 3 安定化待機 (SC4823 が監視サイクルを開始するまで 50ms) */   \
             if (cfg->has_sleep_gpio) {                                          \
-                k_sleep(K_MSEC(50));                                            \
+                k_busy_wait(50000);                                             \
+            }                                                                   \
+            /* SENSE arm: Mode 3 安定化後に AWAKE レベルを確認してから arm */    \
+            if (cfg->has_wakeup_gpio) {                                         \
+                gpio_port_value_t _wp = 0;                                      \
+                gpio_port_get_raw(cfg->wakeup_gpio.port, &_wp);                 \
+                int _awake = (_wp >> cfg->wakeup_gpio.pin) & 1;                 \
+                LOG_INF("HE kscan[" #n "]: AWAKE=%s after 50ms settle",        \
+                        _awake ? "H" : "L");                                    \
+                int _ret = gpio_pin_interrupt_configure_dt(&cfg->wakeup_gpio,  \
+                                                GPIO_INT_LEVEL_ACTIVE);        \
+                if (_ret < 0) {                                                 \
+                    LOG_WRN("HE kscan[" #n "]: wakeup GPIO err: %d "           \
+                            "(continuing)", _ret);                              \
+                } else {                                                        \
+                    LOG_INF("HE kscan[" #n "]: SENSE armed");                  \
+                }\
             }                                                                   \
             return 0;\
                                                                                 \
