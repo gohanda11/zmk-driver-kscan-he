@@ -780,6 +780,20 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
             LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
             IF_ENABLED(CONFIG_ZMK_KSCAN_HE_MODE3_DEBUG, (                      \
+                /* VOUT rest マップ: 全センサーのVOUT rest値を出力 */            \
+                /* VQ(≈2.97V) - VOUT_rest > 0.4V の個体がMode3誤検出の原因 */   \
+                LOG_INF("HE kscan[" #n "]: [DBG] === VOUT rest map"            \
+                        " (VQ~2970mV, thresh=0.4V) ===");                       \
+                for (int _k = 0; _k < (int)cfg->num_keys; _k++) {              \
+                    uint32_t _rv = (uint32_t)(ADC_MAX_VALUE -                   \
+                        data->keys[_k].adc_rest) * 3600u / ADC_MAX_VALUE;      \
+                    /* Flag: VQ_max(95%*3300=3135) - 0.4V = 2735mV */           \
+                    LOG_INF("HE kscan[" #n "]: [DBG] k[%02d]"                  \
+                            " rest=%umV adc=%u%s",                              \
+                            _k, _rv, data->keys[_k].adc_rest,                  \
+                            (_rv < 2740u) ? " <<RISK>>" : "");                  \
+                }                                                               \
+                LOG_INF("HE kscan[" #n "]: [DBG] === end VOUT map ===");        \
                 /* デバッグ: Mode3テスト (10s待機 → Mode3 10sログ → Mode1) */   \
                 LOG_INF("HE kscan[" #n "]: [DBG] waiting 10s before Mode3");   \
                 k_sleep(K_SECONDS(10));                                         \
