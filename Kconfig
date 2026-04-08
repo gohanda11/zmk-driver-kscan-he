@@ -23,3 +23,13 @@ config ZMK_KSCAN_HE_CONFIGURABLE_THRESHOLDS
       Enable per-key threshold arrays and the zmk_kscan_he_api public API.
       Thresholds can be changed at runtime and persisted to NVS via
       Zephyr settings subsystem.
+
+config ZMK_KSCAN_HE_MODE3_DEBUG
+    bool "Mode3 suspend debug: test Mode3 for 10s before System OFF"
+    default n
+    depends on ZMK_KSCAN_ADC_MUX
+    help
+      When enabled, the suspend handler waits 10s in Mode1, then enters
+      Mode3 for 10s logging AWAKE level every second, returns to Mode1,
+      then proceeds with the normal sleep sequence (SENSE arm + System OFF).
+      Use only for debugging SC4823 Mode3 wakeup behavior.

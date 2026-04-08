@@ -779,6 +779,33 @@ int zmk_kscan_he_recalibrate(const struct device *dev) {
         case PM_DEVICE_ACTION_SUSPEND:                                          \
             LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
+            IF_ENABLED(CONFIG_ZMK_KSCAN_HE_MODE3_DEBUG, (                      \
+                /* デバッグ: Mode3テスト (10s待機 → Mode3 10sログ → Mode1) */   \
+                LOG_INF("HE kscan[" #n "]: [DBG] waiting 10s before Mode3");   \
+                k_sleep(K_SECONDS(10));                                         \
+                if (cfg->has_sleep_gpio) {                                      \
+                    gpio_pin_set_dt(&cfg->sleep_gpio, 1);                       \
+                    data->sleep_active = true;                                  \
+                    LOG_INF("HE kscan[" #n "]: [DBG] Mode3 TEST start");       \
+                }                                                               \
+                for (int _i = 0; _i < 10; _i++) {                              \
+                    k_sleep(K_SECONDS(1));                                      \
+                    if (cfg->has_wakeup_gpio) {                                 \
+                        gpio_port_value_t _wdbg = 0;                           \
+                        gpio_port_get_raw(cfg->wakeup_gpio.port, &_wdbg);      \
+                        int _adbg = (_wdbg >> cfg->wakeup_gpio.pin) & 1;       \
+                        LOG_INF("HE kscan[" #n "]: [DBG] Mode3 [%d/10]"       \
+                                " AWAKE=%s", _i + 1, _adbg ? "H" : "L");      \
+                    }                                                           \
+                }                                                               \
+                if (cfg->has_sleep_gpio) {                                      \
+                    gpio_pin_set_dt(&cfg->sleep_gpio, 0);                       \
+                    data->sleep_active = false;                                 \
+                    LOG_INF("HE kscan[" #n "]: [DBG] Mode3 TEST done, SLEEP=L");\
+                }                                                               \
+                k_sleep(K_SECONDS(2));                                          \
+                LOG_INF("HE kscan[" #n "]: [DBG] entering actual sleep seq");  \
+            ))                                                                  \
             /* SC4823 → Mode 3: SLEEP=HIGH で磁気変化監視モードに移行 */        \
             if (cfg->has_wakeup_gpio) {                                         \
                 gpio_port_value_t _wp0 = 0;                                     \
