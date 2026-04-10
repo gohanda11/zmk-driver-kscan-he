@@ -23,6 +23,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
+#include <hal/nrf_gpio.h>
 
 #include "he_key_state.h"
 
@@ -151,6 +152,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         struct gpio_dt_spec wakeup_gpio;                                        \
         bool has_sleep_gpio;                                                    \
         bool has_wakeup_gpio;                                                   \
+        uint32_t wakeup_nrf_abs_pin;                                            \
     };                                                                          \
                                                                                 \
     static const struct he_kscan_cfg_##n he_cfg_##n = {                         \
@@ -178,6 +180,10 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         .has_wakeup_gpio = DT_INST_NODE_HAS_PROP(n, wakeup_gpios),             \
         .wakeup_gpio = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, wakeup_gpios),     \
             (GPIO_DT_SPEC_INST_GET(n, wakeup_gpios)), ({0})),                   \
+        .wakeup_nrf_abs_pin = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, wakeup_gpios), \
+            (NRF_GPIO_PIN_MAP(                                                  \
+                DT_PROP(DT_GPIO_CTLR(DT_DRV_INST(n), wakeup_gpios), port),     \
+                DT_GPIO_PIN(DT_DRV_INST(n), wakeup_gpios))), (0)),             \
     };                                                                          \
                                                                                 \
     /* Driver runtime data */                                                   \
@@ -518,7 +524,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                 return -ENODEV;                                                 \
             }                                                                   \
             gpio_pin_configure_dt(&cfg->wakeup_gpio, GPIO_INPUT | GPIO_PULL_UP);\
-        }                                                                       \
+        }\
                                                                                 \
         /* Initialize scan work item */                                         \
         k_work_init_delayable(&data->scan_work, he_scan_##n);                   \
@@ -556,9 +562,36 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         case PM_DEVICE_ACTION_SUSPEND:                                          \
             LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
+                                                                                \
+            /* Put SC4823 into Mode 3 (sleep + wakeup monitoring) */            \
+            if (cfg->has_sleep_gpio) {                                          \
+                gpio_pin_set_dt(&cfg->sleep_gpio, 1);                           \
+            }                                                                   \
+                                                                                \
+            /* Set nRF GPIO SENSE directly via HAL for System OFF wakeup.    */ \
+            /* Using nrf_gpio_cfg_sense_set() instead of Zephyr GPIO API     */ \
+            /* to avoid triggering GPIOTE PORT event ISR, which can enter    */ \
+            /* an infinite loop if the pin is already at the active level    */ \
+            /* and can disrupt other GPIO callbacks on the same port.        */ \
+            if (cfg->has_wakeup_gpio) {                                         \
+                nrf_gpio_cfg_sense_set(cfg->wakeup_nrf_abs_pin,                 \
+                                       NRF_GPIO_PIN_SENSE_LOW);                 \
+            }                                                                   \
             return 0;                                                           \
                                                                                 \
         case PM_DEVICE_ACTION_RESUME:                                           \
+            /* Clear SENSE to stop wakeup detection */                          \
+            if (cfg->has_wakeup_gpio) {                                         \
+                nrf_gpio_cfg_sense_set(cfg->wakeup_nrf_abs_pin,                 \
+                                       NRF_GPIO_PIN_NOSENSE);                   \
+            }\
+                                                                                \
+            /* Return SC4823 to Mode 1 (normal operation) */                    \
+            if (cfg->has_sleep_gpio) {                                          \
+                gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
+                k_sleep(K_MSEC(5));                                             \
+            }                                                                   \
+                                                                                \
             /* Re-calibrate and restart scanning */                             \
             he_calibrate_##n(dev);                                              \
             data->last_activity_ms = k_uptime_get();                            \
