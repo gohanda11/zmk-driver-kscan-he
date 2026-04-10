@@ -23,8 +23,6 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
-#include <hal/nrf_gpio.h>
-#include <hal/nrf_power.h>
 
 #include "he_key_state.h"
 
@@ -153,7 +151,6 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         struct gpio_dt_spec wakeup_gpio;                                        \
         bool has_sleep_gpio;                                                    \
         bool has_wakeup_gpio;                                                   \
-        uint32_t wakeup_nrf_abs_pin;                                            \
     };                                                                          \
                                                                                 \
     static const struct he_kscan_cfg_##n he_cfg_##n = {                         \
@@ -181,10 +178,6 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         .has_wakeup_gpio = DT_INST_NODE_HAS_PROP(n, wakeup_gpios),             \
         .wakeup_gpio = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, wakeup_gpios),     \
             (GPIO_DT_SPEC_INST_GET(n, wakeup_gpios)), ({0})),                   \
-        .wakeup_nrf_abs_pin = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, wakeup_gpios), \
-            (NRF_GPIO_PIN_MAP(                                                  \
-                DT_PROP(DT_GPIO_CTLR(DT_DRV_INST(n), wakeup_gpios), port),     \
-                DT_GPIO_PIN(DT_DRV_INST(n), wakeup_gpios))), (0)),             \
     };                                                                          \
                                                                                 \
     /* Driver runtime data */                                                   \
@@ -197,20 +190,6 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         int64_t              last_activity_ms;                                  \
         bool                 idle_mode;                                         \
         uint32_t             scan_count;                                        \
-        /* AWAKE test deferred-execution state */                               \
-        struct k_work_delayable awake_test_work;                                \
-        struct k_work_delayable awake_reprint_work;                             \
-        int  awake_reprint_remaining;                                           \
-        int  awake_reprint_total;                                               \
-        int  awake_ph1_high;                                                    \
-        int  awake_ph1_low;                                                     \
-        int  awake_ph2_high;                                                    \
-        int  awake_ph2_low;                                                     \
-        int  awake_ph3_high;                                                    \
-        int  awake_ph3_low;                                                     \
-        int  awake_port_num;                                                    \
-        int  awake_pin;                                                         \
-        bool awake_test_done;                                                   \
     };                                                                          \
                                                                                 \
     static struct he_kscan_data_##n he_data_##n;
@@ -505,36 +484,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         int ret;                                                                \
                                                                                 \
         data->dev = dev;                                                        \
-                                                                                 \
-        /* Log reset reason and GPIO LATCH for wakeup diagnosis */              \
-        {                                                                       \
-            uint32_t resetreas = NRF_POWER->RESETREAS;                          \
-            uint32_t latch0 = NRF_P0->LATCH;                                    \
-            uint32_t latch1 = NRF_P1->LATCH;                                    \
-            LOG_INF("RESET reason=0x%08x (GPIO=%d SREQ=%d DOG=%d PIN=%d)",      \
-                    resetreas,                                                   \
-                    (resetreas >> 16) & 1,                                       \
-                    (resetreas >> 18) & 1,                                       \
-                    (resetreas >> 17) & 1,                                       \
-                    (resetreas >> 0) & 1);                                       \
-            LOG_INF("GPIO LATCH P0=0x%08x P1=0x%08x", latch0, latch1);         \
-            if (latch1) {                                                        \
-                for (int _b = 0; _b < 16; _b++) {                               \
-                    if (latch1 & (1u << _b)) {                                   \
-                        LOG_INF("  LATCH P1.%02d = set (wakeup source?)", _b);  \
-                    }                                                            \
-                }                                                                \
-            }                                                                    \
-            if (latch0) {                                                        \
-                for (int _b = 0; _b < 32; _b++) {                               \
-                    if (latch0 & (1u << _b)) {                                   \
-                        LOG_INF("  LATCH P0.%02d = set (wakeup source?)", _b);  \
-                    }                                                            \
-                }                                                                \
-            }                                                                    \
-            NRF_POWER->RESETREAS = resetreas;                                    \
-        }                                                                       \
-                                                                                 \
+                                                                                \
         /* Configure MUX select GPIO pins as outputs, default LOW */            \
         for (uint8_t i = 0; i < cfg->num_select; i++) {                         \
             if (!device_is_ready(cfg->select_gpios[i].port)) {                  \
@@ -597,22 +547,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         LOG_INF("HE20 kscan driver initialized (%d keys) uptime=%lldms",        \
                 cfg->num_keys, k_uptime_get());                                 \
-                                                                                 \
-        IF_ENABLED(CONFIG_HE_KSCAN_AWAKE_TEST, (                                \
-            k_work_init_delayable(&data->awake_test_work,                        \
-                                  he_awake_test_work_handler_##n);               \
-            k_work_init_delayable(&data->awake_reprint_work,                     \
-                                  he_awake_reprint_work_handler_##n);            \
-            data->awake_test_done = false;                                       \
-            data->awake_reprint_total =                                          \
-                CONFIG_HE_KSCAN_AWAKE_TEST_REPEAT_COUNT;                        \
-            LOG_INF("AWAKE test scheduled: starts in %ds"                       \
-                    " (connect serial monitor now)",                             \
-                    CONFIG_HE_KSCAN_AWAKE_TEST_DELAY_S);                        \
-            k_work_schedule(&data->awake_test_work,                              \
-                            K_SECONDS(CONFIG_HE_KSCAN_AWAKE_TEST_DELAY_S));     \
-        ))                                                                       \
-                                                                                 \
+                                                                                \
         return 0;                                                               \
     }                                                                           \
                                                                                 \
@@ -633,29 +568,13 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
             LOG_INF("HE kscan[" #n "]: suspending");                           \
             k_work_cancel_delayable(&data->scan_work);                          \
                                                                                 \
-            /* Put SC4823 into Mode 3 (sleep + wakeup monitoring) */            \
+            /* Put SC4823 into Mode 3 (sleep, low-power ~1.5µA/IC) */          \
             if (cfg->has_sleep_gpio) {                                          \
                 gpio_pin_set_dt(&cfg->sleep_gpio, 1);                           \
-            }                                                                   \
-                                                                                \
-            /* Set nRF GPIO SENSE directly via HAL for System OFF wakeup.    */ \
-            /* Using nrf_gpio_cfg_sense_set() instead of Zephyr GPIO API     */ \
-            /* to avoid triggering GPIOTE PORT event ISR, which can enter    */ \
-            /* an infinite loop if the pin is already at the active level    */ \
-            /* and can disrupt other GPIO callbacks on the same port.        */ \
-            if (cfg->has_wakeup_gpio) {                                         \
-                nrf_gpio_cfg_sense_set(cfg->wakeup_nrf_abs_pin,                 \
-                                       NRF_GPIO_PIN_SENSE_LOW);                 \
             }                                                                   \
             return 0;                                                           \
                                                                                 \
         case PM_DEVICE_ACTION_RESUME:                                           \
-            /* Clear SENSE to stop wakeup detection */                          \
-            if (cfg->has_wakeup_gpio) {                                         \
-                nrf_gpio_cfg_sense_set(cfg->wakeup_nrf_abs_pin,                 \
-                                       NRF_GPIO_PIN_NOSENSE);                   \
-            }\
-                                                                                \
             /* Return SC4823 to Mode 1 (normal operation) */                    \
             if (cfg->has_sleep_gpio) {                                          \
                 gpio_pin_set_dt(&cfg->sleep_gpio, 0);                           \
@@ -677,252 +596,6 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         }                                                                       \
     }                                                                           \
                                                                                 \
-                                                                                \
-    static int he_awake_pin_test_##n(void) __attribute__((unused));            \
-    static int he_awake_pin_test_##n(void)                                      \
-    {                                                                           \
-        const struct he_kscan_cfg_##n *cfg = &he_cfg_##n;                       \
-        struct he_kscan_data_##n *data = &he_data_##n;                          \
-        if (!cfg->has_sleep_gpio || !cfg->has_wakeup_gpio) {                    \
-            LOG_INF("AWAKE test[" #n "]: no sleep/wakeup GPIOs, skip");         \
-            return 0;                                                           \
-        }                                                                       \
-        const struct device *wport = cfg->wakeup_gpio.port;                     \
-        gpio_pin_t wpin = cfg->wakeup_gpio.pin;                                 \
-        gpio_port_value_t pval = 0;                                             \
-        int port_num = (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0;  \
-                                                                                \
-        /* Brief countdown before test begins */                                \
-        LOG_INF("AWAKE test starting (USB serial should be ready)");            \
-        LOG_INF(">>> Results will be reprinted every 30s after test <<<");      \
-        for (int _w = 3; _w > 0; _w--) {                                        \
-            LOG_INF("  test starts in %d seconds...", _w);                       \
-            k_sleep(K_SECONDS(1));                                               \
-        }                                                                       \
-                                                                                \
-        LOG_INF("========================================");                    \
-        LOG_INF("=== AWAKE PIN (P%d.%02d) TEST START ===", port_num, wpin);    \
-        LOG_INF("========================================");                    \
-                                                                                \
-        /* ---- Phase 0: Key rest voltage analysis ---- */                      \
-        /* VQ = 90%% x VCC = 2970mV, AWAKE threshold = 0.4V = 400mV */         \
-        /* Safe: VOUT > 2570mV (rest_adc < 1170). NG: VOUT <= 2570mV */        \
-        LOG_INF("[Phase 0] Key rest voltage analysis (from calibration):");     \
-        LOG_INF("  VQ=2970mV, AWAKE threshold=400mV, safe > 2570mV");          \
-        int ng_count = 0;                                                       \
-        for (uint8_t _k = 0; _k < cfg->num_keys; _k++) {                        \
-            uint16_t _rest_adc = data->keys[_k].adc_rest;                        \
-            uint32_t _rest_mv = (uint32_t)(ADC_MAX_VALUE - _rest_adc)            \
-                                * 3600u / ADC_MAX_VALUE;                         \
-            int _delta = 2970 - (int)_rest_mv;                                   \
-            const char *_status = (_delta > 400) ? "NG!" : "OK ";               \
-            if (_delta > 400) { ng_count++; }                                    \
-            LOG_INF("  key[%2d] adc=%4u vout=%4umV delta=%4dmV %s",              \
-                    _k, _rest_adc, _rest_mv, _delta, _status);                   \
-        }                                                                       \
-        LOG_INF("[Phase 0] RESULT: %d/%d keys exceed 400mV threshold",          \
-                ng_count, cfg->num_keys);                                        \
-        if (ng_count > 0) {                                                      \
-            LOG_INF("  -> AWAKE will be permanently LOW in Mode 3");             \
-            LOG_INF("  -> HE wakeup NOT possible. Increase magnet distance");   \
-        } else {                                                                 \
-            LOG_INF("  -> All keys within threshold. AWAKE should work!");       \
-        }                                                                       \
-        LOG_INF("----------------------------------------");                    \
-                                                                                 \
-        /* Stop scan_work so MUX stops switching */                             \
-        k_work_cancel_delayable(&data->scan_work);                              \
-        k_sleep(K_MSEC(20));                                                    \
-        for (uint8_t i = 0; i < cfg->num_select; i++) {                         \
-            gpio_pin_set_dt(&cfg->select_gpios[i], 0);                          \
-        }                                                                       \
-                                                                                \
-        /* ---- Phase 1: Mode 1 (SLEEP=Low) ---- */                            \
-        /* SC4823 AWAKE pin is INPUT in Mode 1. nRF pull-up drives it. */      \
-        /* If LOW here: pin is shorted to GND or wiring problem.       */      \
-        gpio_pin_set_dt(&cfg->sleep_gpio, 0);                                   \
-        k_sleep(K_MSEC(50));                                                    \
-                                                                                \
-        LOG_INF("[Phase 1] Mode 1 (SLEEP=Low): reading P%d.%02d for 3s...",    \
-                port_num, wpin);                                                 \
-        LOG_INF("  SC4823 AWAKE is INPUT in Mode 1 -> expect HIGH (pull-up)"); \
-        int ph1_high = 0, ph1_low = 0;                                          \
-        for (int i = 0; i < 300; i++) {                                          \
-            gpio_port_get_raw(wport, &pval);                                     \
-            if ((pval >> wpin) & 1) { ph1_high++; } else { ph1_low++; }         \
-            k_sleep(K_MSEC(10));                                                 \
-        }                                                                       \
-        LOG_INF("[Phase 1] RESULT: HIGH=%d LOW=%d -> %s",                       \
-                ph1_high, ph1_low,                                               \
-                ph1_low == 0 ? "OK (pin is HIGH)" :                             \
-                ph1_high == 0 ? "BAD: pin stuck LOW! wiring issue?" :           \
-                "UNSTABLE: floating?");                                          \
-                                                                                \
-        /* ---- Phase 2: Mode 3 idle (no key press) ---- */                    \
-        /* SC4823 monitors VOUT every 12.5ms in Mode 3.                */      \
-        /* AWAKE should stay HIGH if no magnet displacement detected.  */      \
-        LOG_INF("[Phase 2] Mode 3 (SLEEP=High) idle: DO NOT press keys!");     \
-        LOG_INF("  Monitoring P%d.%02d for 5s -> expect HIGH", port_num, wpin);\
-        gpio_pin_set_dt(&cfg->sleep_gpio, 1);                                   \
-        k_sleep(K_MSEC(100));  /* wait for SC4823 Mode 3 entry */               \
-                                                                                \
-        int ph2_high = 0, ph2_low = 0;                                          \
-        int prev_phys = -1;                                                      \
-        for (int i = 0; i < 500; i++) {                                          \
-            gpio_port_get_raw(wport, &pval);                                     \
-            int cur = (pval >> wpin) & 1;                                       \
-            if (cur) { ph2_high++; } else { ph2_low++; }                        \
-            if (cur != prev_phys) {                                              \
-                LOG_INF("  t=%dms: P%d.%02d -> %s",                             \
-                        i * 10, port_num, wpin,                                  \
-                        cur ? "HIGH(idle)" : "LOW(AWAKE triggered!)");          \
-                prev_phys = cur;                                                 \
-            }                                                                   \
-            if (i % 100 == 99) {                                                 \
-                LOG_INF("  t=%ds: HIGH=%d LOW=%d", (i+1)/100, ph2_high, ph2_low); \
-            }                                                                   \
-            k_sleep(K_MSEC(10));                                                 \
-        }                                                                       \
-        LOG_INF("[Phase 2] RESULT: HIGH=%d LOW=%d -> %s",                       \
-                ph2_high, ph2_low,                                               \
-                ph2_low == 0 ? "OK (HIGH at idle)" :                            \
-                ph2_high == 0 ? "BAD: always LOW! sleep wake WILL FAIL" :       \
-                "MIXED: intermittent AWAKE trigger");                            \
-                                                                                \
-        /* ---- Phase 3: Mode 3 with key press ---- */                         \
-        /* Stay in Mode 3. User should press a key. AWAKE -> LOW.     */       \
-        LOG_INF("[Phase 3] Mode 3: PRESS AND HOLD a key NOW! (5s)");           \
-        LOG_INF("  Monitoring P%d.%02d -> expect LOW during press",            \
-                port_num, wpin);                                                 \
-                                                                                \
-        int ph3_high = 0, ph3_low = 0;                                          \
-        prev_phys = -1;                                                          \
-        for (int i = 0; i < 500; i++) {                                          \
-            gpio_port_get_raw(wport, &pval);                                     \
-            int cur = (pval >> wpin) & 1;                                       \
-            if (cur) { ph3_high++; } else { ph3_low++; }                        \
-            if (cur != prev_phys) {                                              \
-                LOG_INF("  t=%dms: P%d.%02d -> %s",                             \
-                        i * 10, port_num, wpin,                                  \
-                        cur ? "HIGH(released)" : "LOW(AWAKE=press!)");          \
-                prev_phys = cur;                                                 \
-            }                                                                   \
-            if (i % 100 == 99) {                                                 \
-                LOG_INF("  t=%ds: HIGH=%d LOW=%d", (i+1)/100, ph3_high, ph3_low); \
-            }                                                                   \
-            k_sleep(K_MSEC(10));                                                 \
-        }                                                                       \
-        LOG_INF("[Phase 3] RESULT: HIGH=%d LOW=%d -> %s",                       \
-                ph3_high, ph3_low,                                               \
-                ph3_low > 0 ? "OK (LOW detected = press works)" :              \
-                "BAD: never LOW! AWAKE not responding to key press");           \
-                                                                                \
-        /* Return to Mode 1 */                                                  \
-        gpio_pin_set_dt(&cfg->sleep_gpio, 0);                                   \
-                                                                                \
-        /* ---- Summary ---- */                                                 \
-        LOG_INF("========================================");                    \
-        LOG_INF("=== AWAKE PIN TEST SUMMARY ===");                             \
-        LOG_INF("  Phase 1 Mode1 (SLEEP=Low):  HIGH=%d LOW=%d", ph1_high, ph1_low); \
-        LOG_INF("  Phase 2 Mode3 idle:         HIGH=%d LOW=%d", ph2_high, ph2_low); \
-        LOG_INF("  Phase 3 Mode3 press:        HIGH=%d LOW=%d", ph3_high, ph3_low); \
-                                                                                \
-        bool wake_ok = (ph2_low == 0) && (ph3_low > 0);                        \
-        if (wake_ok) {                                                          \
-            LOG_INF("  >>> SLEEP WAKE: OK - can wake from System OFF");        \
-        } else {                                                                \
-            LOG_WRN("  >>> SLEEP WAKE: WILL FAIL");                            \
-            if (ph1_low > 0) {                                                  \
-                LOG_WRN("  P%d.%02d is LOW even in Mode 1:", port_num, wpin);  \
-                LOG_WRN("    -> Check wiring: pin may be shorted to GND");     \
-                LOG_WRN("    -> Or SC4823 AWAKE is open-drain pulling down");  \
-                LOG_WRN("    -> Try external 10k pull-up to 3.3V");            \
-            }                                                                   \
-            if (ph2_low > 0 && ph1_low == 0) {                                  \
-                LOG_WRN("  LOW in Mode 3 idle (no press) = SC4823 issue:");    \
-                LOG_WRN("    -> Magnet resting position too close to sensor"); \
-                LOG_WRN("    -> SC4823 VOUT baseline shift > 0.4V threshold"); \
-                LOG_WRN("    -> If multiple SC4823 share AWAKE, one bad IC");  \
-            }                                                                   \
-            if (ph3_low == 0) {                                                  \
-                LOG_WRN("  Never LOW even when pressing = AWAKE disconnected");\
-            }                                                                   \
-        }                                                                       \
-        LOG_INF("========================================");                    \
-                                                                                \
-        /* Store results for later reprinting */                                \
-        data->awake_ph1_high = ph1_high;                                        \
-        data->awake_ph1_low = ph1_low;                                          \
-        data->awake_ph2_high = ph2_high;                                        \
-        data->awake_ph2_low = ph2_low;                                          \
-        data->awake_ph3_high = ph3_high;                                        \
-        data->awake_ph3_low = ph3_low;                                          \
-        data->awake_port_num = port_num;                                        \
-        data->awake_pin = (int)wpin;                                            \
-        data->awake_test_done = true;                                           \
-                                                                                \
-        /* Schedule periodic reprints of the summary */                         \
-        data->awake_reprint_remaining = data->awake_reprint_total;              \
-        if (data->awake_reprint_remaining > 0) {                                \
-            k_work_schedule(&data->awake_reprint_work, K_SECONDS(30));          \
-        }                                                                       \
-                                                                                \
-        /* Restart scanning */                                                  \
-        k_work_reschedule(&data->scan_work, K_MSEC(cfg->scan_period_ms));       \
-        return 0;                                                               \
-    }                                                                           \
-                                                                                \
-    /* --------------------------------------------------------------- */       \
-    /* AWAKE test: deferred work handler + summary reprint              */       \
-    /* --------------------------------------------------------------- */       \
-    static void he_awake_print_summary_##n(void) __attribute__((unused));       \
-    static void he_awake_print_summary_##n(void)                                \
-    {                                                                           \
-        struct he_kscan_data_##n *data = &he_data_##n;                          \
-        if (!data->awake_test_done) { return; }                                 \
-        bool wake_ok = (data->awake_ph2_low == 0) &&                            \
-                       (data->awake_ph3_low > 0);                               \
-        LOG_INF("========================================");                    \
-        LOG_INF("=== AWAKE PIN TEST SUMMARY (reprint) ===");                   \
-        LOG_INF("  Pin: P%d.%02d",                                             \
-                data->awake_port_num, data->awake_pin);                         \
-        LOG_INF("  Phase 1 Mode1:  HIGH=%d LOW=%d",                            \
-                data->awake_ph1_high, data->awake_ph1_low);                     \
-        LOG_INF("  Phase 2 Mode3 idle:  HIGH=%d LOW=%d",                       \
-                data->awake_ph2_high, data->awake_ph2_low);                     \
-        LOG_INF("  Phase 3 Mode3 press: HIGH=%d LOW=%d",                       \
-                data->awake_ph3_high, data->awake_ph3_low);                     \
-        LOG_INF("  >>> SLEEP WAKE: %s",                                        \
-                wake_ok ? "OK" : "WILL FAIL");                                  \
-        LOG_INF("========================================");                    \
-    }                                                                           \
-                                                                                \
-    static void he_awake_test_work_handler_##n(struct k_work *work)             \
-        __attribute__((unused));                                                 \
-    static void he_awake_test_work_handler_##n(struct k_work *work)             \
-    {                                                                           \
-        ARG_UNUSED(work);                                                       \
-        he_awake_pin_test_##n();                                                \
-    }                                                                           \
-                                                                                \
-    static void he_awake_reprint_work_handler_##n(struct k_work *work)          \
-        __attribute__((unused));                                                 \
-    static void he_awake_reprint_work_handler_##n(struct k_work *work)          \
-    {                                                                           \
-        ARG_UNUSED(work);                                                       \
-        struct he_kscan_data_##n *data = &he_data_##n;                          \
-        if (!data->awake_test_done ||                                           \
-            data->awake_reprint_remaining <= 0) { return; }                     \
-        int rep_num = data->awake_reprint_total -                               \
-                      data->awake_reprint_remaining + 1;                        \
-        LOG_INF("(Reprint %d/%d - summary from earlier test)",                 \
-                rep_num, data->awake_reprint_total);                            \
-        he_awake_print_summary_##n();                                           \
-        data->awake_reprint_remaining--;                                        \
-        if (data->awake_reprint_remaining > 0) {                                \
-            k_work_schedule(&data->awake_reprint_work, K_SECONDS(30));          \
-        }                                                                       \
-    }                                                                           \
     PM_DEVICE_DT_INST_DEFINE(n, he_kscan_pm_action_##n);                        \
                                                                                 \
     DEVICE_DT_INST_DEFINE(n,                                                    \
