@@ -13,3 +13,39 @@ config ZMK_KSCAN_ADC_MUX
       SN74LV4051A analog multiplexers and SAADC.
       Reads GH39FKSW Hall Effect sensor values and converts
       to ZMK key press/release events.
+
+config HE_KSCAN_AWAKE_TEST
+    bool "Run SC4823 AWAKE pin diagnostic test at boot"
+    depends on ZMK_KSCAN_ADC_MUX
+    default n
+    help
+      Run a 3-phase diagnostic test of the SC4823 AWAKE pin.
+      The test runs deferred (after boot completes and USB CDC
+      serial enumerates) so output is captured on the serial
+      console. Results are reprinted periodically.
+      Phase 1: Check AWAKE in Mode 1 (expect HIGH)
+      Phase 2: Check AWAKE in Mode 3 idle (expect HIGH)
+      Phase 3: Check AWAKE in Mode 3 with key press (expect LOW)
+      Disable for normal use.
+
+config HE_KSCAN_AWAKE_TEST_DELAY_S
+    int "Seconds after boot before AWAKE test starts"
+    depends on HE_KSCAN_AWAKE_TEST
+    default 10
+    range 5 60
+    help
+      Delay in seconds after driver init before the AWAKE pin
+      diagnostic test begins. This gives USB CDC serial time to
+      enumerate so test output can be captured. 10 seconds is
+      usually enough for USB CDC on nRF52840.
+
+config HE_KSCAN_AWAKE_TEST_REPEAT_COUNT
+    int "Number of times to reprint test summary"
+    depends on HE_KSCAN_AWAKE_TEST
+    default 5
+    range 0 20
+    help
+      After the test completes, the summary is reprinted this
+      many times at 30-second intervals so you can catch the
+      results even if you connect the serial monitor late.
+      Set to 0 to disable reprinting.

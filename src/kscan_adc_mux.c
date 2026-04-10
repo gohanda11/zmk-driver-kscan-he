@@ -196,6 +196,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         int64_t              last_activity_ms;                                  \
         bool                 idle_mode;                                         \
         uint32_t             scan_count;                                        \
+        IF_ENABLED(CONFIG_HE_KSCAN_AWAKE_TEST, (                               \
+            struct k_work_delayable awake_test_work;                            \
+        ))                                                                      \
     };                                                                          \
                                                                                 \
     static struct he_kscan_data_##n he_data_##n;
@@ -471,6 +474,17 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     }                                                                           \
                                                                                 \
     /* --------------------------------------------------------------- */       \
+    /* Forward declaration for AWAKE test (defined below PM action)     */       \
+    /* --------------------------------------------------------------- */       \
+    IF_ENABLED(CONFIG_HE_KSCAN_AWAKE_TEST, (                                \
+        static int he_awake_pin_test_##n(void);                              \
+        static void he_awake_test_work_handler_##n(struct k_work *work)      \
+        {                                                                    \
+            he_awake_pin_test_##n();                                         \
+        }                                                                    \
+    ))                                                                       \
+                                                                                 \
+    /* --------------------------------------------------------------- */       \
     /* Device init                                                      */       \
     /* --------------------------------------------------------------- */       \
     static int he_kscan_init_##n(const struct device *dev)                      \
@@ -543,6 +557,14 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
                                                                                 \
         LOG_INF("HE20 kscan driver initialized (%d keys) uptime=%lldms",        \
                 cfg->num_keys, k_uptime_get());                                 \
+                                                                                 \
+        IF_ENABLED(CONFIG_HE_KSCAN_AWAKE_TEST, (                                \
+            k_work_init_delayable(&data->awake_test_work,                        \
+                                  he_awake_test_work_handler_##n);               \
+            k_work_reschedule(&data->awake_test_work, K_SECONDS(15));            \
+            LOG_INF("AWAKE test scheduled in 15s (connect serial monitor now)"); \
+        ))                                                                       \
+                                                                                 \
         return 0;                                                               \
     }                                                                           \
                                                                                 \
@@ -622,8 +644,7 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         gpio_port_value_t pval = 0;                                             \
         int port_num = (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0;  \
                                                                                 \
-        /* Wait for USB CDC serial console to enumerate */                      \
-        k_sleep(K_SECONDS(5));                                                  \
+        /* Test is now deferred via k_work_delayable; USB should be ready */    \
                                                                                 \
         LOG_INF("========================================");                    \
         LOG_INF("=== AWAKE PIN (P%d.%02d) TEST START ===", port_num, wpin);    \
