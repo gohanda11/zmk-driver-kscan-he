@@ -24,6 +24,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
 #include <hal/nrf_gpio.h>
+#include <hal/nrf_power.h>
 
 #include "he_key_state.h"
 
@@ -504,7 +505,36 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         int ret;                                                                \
                                                                                 \
         data->dev = dev;                                                        \
-                                                                                \
+                                                                                 \
+        /* Log reset reason and GPIO LATCH for wakeup diagnosis */              \
+        {                                                                       \
+            uint32_t resetreas = NRF_POWER->RESETREAS;                          \
+            uint32_t latch0 = NRF_P0->LATCH;                                    \
+            uint32_t latch1 = NRF_P1->LATCH;                                    \
+            LOG_INF("RESET reason=0x%08x (GPIO=%d SREQ=%d DOG=%d PIN=%d)",      \
+                    resetreas,                                                   \
+                    (resetreas >> 16) & 1,                                       \
+                    (resetreas >> 18) & 1,                                       \
+                    (resetreas >> 17) & 1,                                       \
+                    (resetreas >> 0) & 1);                                       \
+            LOG_INF("GPIO LATCH P0=0x%08x P1=0x%08x", latch0, latch1);         \
+            if (latch1) {                                                        \
+                for (int _b = 0; _b < 16; _b++) {                               \
+                    if (latch1 & (1u << _b)) {                                   \
+                        LOG_INF("  LATCH P1.%02d = set (wakeup source?)", _b);  \
+                    }                                                            \
+                }                                                                \
+            }                                                                    \
+            if (latch0) {                                                        \
+                for (int _b = 0; _b < 32; _b++) {                               \
+                    if (latch0 & (1u << _b)) {                                   \
+                        LOG_INF("  LATCH P0.%02d = set (wakeup source?)", _b);  \
+                    }                                                            \
+                }                                                                \
+            }                                                                    \
+            NRF_POWER->RESETREAS = resetreas;                                    \
+        }                                                                       \
+                                                                                 \
         /* Configure MUX select GPIO pins as outputs, default LOW */            \
         for (uint8_t i = 0; i < cfg->num_select; i++) {                         \
             if (!device_is_ready(cfg->select_gpios[i].port)) {                  \
