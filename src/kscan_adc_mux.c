@@ -196,9 +196,20 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         int64_t              last_activity_ms;                                  \
         bool                 idle_mode;                                         \
         uint32_t             scan_count;                                        \
-        IF_ENABLED(CONFIG_HE_KSCAN_AWAKE_TEST, (                               \
-            struct k_work_delayable awake_test_work;                            \
-        ))                                                                      \
+        /* AWAKE test deferred-execution state */                               \
+        struct k_work_delayable awake_test_work;                                \
+        struct k_work_delayable awake_reprint_work;                             \
+        int  awake_reprint_remaining;                                           \
+        int  awake_reprint_total;                                               \
+        int  awake_ph1_high;                                                    \
+        int  awake_ph1_low;                                                     \
+        int  awake_ph2_high;                                                    \
+        int  awake_ph2_low;                                                     \
+        int  awake_ph3_high;                                                    \
+        int  awake_ph3_low;                                                     \
+        int  awake_port_num;                                                    \
+        int  awake_pin;                                                         \
+        bool awake_test_done;                                                   \
     };                                                                          \
                                                                                 \
     static struct he_kscan_data_##n he_data_##n;
@@ -478,10 +489,9 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
     /* --------------------------------------------------------------- */       \
     IF_ENABLED(CONFIG_HE_KSCAN_AWAKE_TEST, (                                \
         static int he_awake_pin_test_##n(void);                              \
-        static void he_awake_test_work_handler_##n(struct k_work *work)      \
-        {                                                                    \
-            he_awake_pin_test_##n();                                         \
-        }                                                                    \
+        static void he_awake_test_work_handler_##n(struct k_work *work);     \
+        static void he_awake_reprint_work_handler_##n(struct k_work *work);  \
+        static void he_awake_print_summary_##n(void);                        \
     ))                                                                       \
                                                                                  \
     /* --------------------------------------------------------------- */       \
@@ -561,8 +571,16 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         IF_ENABLED(CONFIG_HE_KSCAN_AWAKE_TEST, (                                \
             k_work_init_delayable(&data->awake_test_work,                        \
                                   he_awake_test_work_handler_##n);               \
-            k_work_reschedule(&data->awake_test_work, K_SECONDS(15));            \
-            LOG_INF("AWAKE test scheduled in 15s (connect serial monitor now)"); \
+            k_work_init_delayable(&data->awake_reprint_work,                     \
+                                  he_awake_reprint_work_handler_##n);            \
+            data->awake_test_done = false;                                       \
+            data->awake_reprint_total =                                          \
+                CONFIG_HE_KSCAN_AWAKE_TEST_REPEAT_COUNT;                        \
+            LOG_INF("AWAKE test scheduled: starts in %ds"                       \
+                    " (connect serial monitor now)",                             \
+                    CONFIG_HE_KSCAN_AWAKE_TEST_DELAY_S);                        \
+            k_work_schedule(&data->awake_test_work,                              \
+                            K_SECONDS(CONFIG_HE_KSCAN_AWAKE_TEST_DELAY_S));     \
         ))                                                                       \
                                                                                  \
         return 0;                                                               \
@@ -644,12 +662,44 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         gpio_port_value_t pval = 0;                                             \
         int port_num = (wport == DEVICE_DT_GET(DT_NODELABEL(gpio1))) ? 1 : 0;  \
                                                                                 \
-        /* Test is now deferred via k_work_delayable; USB should be ready */    \
+        /* Brief countdown before test begins */                                \
+        LOG_INF("AWAKE test starting (USB serial should be ready)");            \
+        LOG_INF(">>> Results will be reprinted every 30s after test <<<");      \
+        for (int _w = 3; _w > 0; _w--) {                                        \
+            LOG_INF("  test starts in %d seconds...", _w);                       \
+            k_sleep(K_SECONDS(1));                                               \
+        }                                                                       \
                                                                                 \
         LOG_INF("========================================");                    \
         LOG_INF("=== AWAKE PIN (P%d.%02d) TEST START ===", port_num, wpin);    \
         LOG_INF("========================================");                    \
                                                                                 \
+        /* ---- Phase 0: Key rest voltage analysis ---- */                      \
+        /* VQ = 90%% x VCC = 2970mV, AWAKE threshold = 0.4V = 400mV */         \
+        /* Safe: VOUT > 2570mV (rest_adc < 1170). NG: VOUT <= 2570mV */        \
+        LOG_INF("[Phase 0] Key rest voltage analysis (from calibration):");     \
+        LOG_INF("  VQ=2970mV, AWAKE threshold=400mV, safe > 2570mV");          \
+        int ng_count = 0;                                                       \
+        for (uint8_t _k = 0; _k < cfg->num_keys; _k++) {                        \
+            uint16_t _rest_adc = data->keys[_k].adc_rest;                        \
+            uint32_t _rest_mv = (uint32_t)(ADC_MAX_VALUE - _rest_adc)            \
+                                * 3600u / ADC_MAX_VALUE;                         \
+            int _delta = 2970 - (int)_rest_mv;                                   \
+            const char *_status = (_delta > 400) ? "NG!" : "OK ";               \
+            if (_delta > 400) { ng_count++; }                                    \
+            LOG_INF("  key[%2d] adc=%4u vout=%4umV delta=%4dmV %s",              \
+                    _k, _rest_adc, _rest_mv, _delta, _status);                   \
+        }                                                                       \
+        LOG_INF("[Phase 0] RESULT: %d/%d keys exceed 400mV threshold",          \
+                ng_count, cfg->num_keys);                                        \
+        if (ng_count > 0) {                                                      \
+            LOG_INF("  -> AWAKE will be permanently LOW in Mode 3");             \
+            LOG_INF("  -> HE wakeup NOT possible. Increase magnet distance");   \
+        } else {                                                                 \
+            LOG_INF("  -> All keys within threshold. AWAKE should work!");       \
+        }                                                                       \
+        LOG_INF("----------------------------------------");                    \
+                                                                                 \
         /* Stop scan_work so MUX stops switching */                             \
         k_work_cancel_delayable(&data->scan_work);                              \
         k_sleep(K_MSEC(20));                                                    \
@@ -770,9 +820,78 @@ static void set_mux_address(const struct gpio_dt_spec *sel,
         }                                                                       \
         LOG_INF("========================================");                    \
                                                                                 \
+        /* Store results for later reprinting */                                \
+        data->awake_ph1_high = ph1_high;                                        \
+        data->awake_ph1_low = ph1_low;                                          \
+        data->awake_ph2_high = ph2_high;                                        \
+        data->awake_ph2_low = ph2_low;                                          \
+        data->awake_ph3_high = ph3_high;                                        \
+        data->awake_ph3_low = ph3_low;                                          \
+        data->awake_port_num = port_num;                                        \
+        data->awake_pin = (int)wpin;                                            \
+        data->awake_test_done = true;                                           \
+                                                                                \
+        /* Schedule periodic reprints of the summary */                         \
+        data->awake_reprint_remaining = data->awake_reprint_total;              \
+        if (data->awake_reprint_remaining > 0) {                                \
+            k_work_schedule(&data->awake_reprint_work, K_SECONDS(30));          \
+        }                                                                       \
+                                                                                \
         /* Restart scanning */                                                  \
         k_work_reschedule(&data->scan_work, K_MSEC(cfg->scan_period_ms));       \
         return 0;                                                               \
+    }                                                                           \
+                                                                                \
+    /* --------------------------------------------------------------- */       \
+    /* AWAKE test: deferred work handler + summary reprint              */       \
+    /* --------------------------------------------------------------- */       \
+    static void he_awake_print_summary_##n(void) __attribute__((unused));       \
+    static void he_awake_print_summary_##n(void)                                \
+    {                                                                           \
+        struct he_kscan_data_##n *data = &he_data_##n;                          \
+        if (!data->awake_test_done) { return; }                                 \
+        bool wake_ok = (data->awake_ph2_low == 0) &&                            \
+                       (data->awake_ph3_low > 0);                               \
+        LOG_INF("========================================");                    \
+        LOG_INF("=== AWAKE PIN TEST SUMMARY (reprint) ===");                   \
+        LOG_INF("  Pin: P%d.%02d",                                             \
+                data->awake_port_num, data->awake_pin);                         \
+        LOG_INF("  Phase 1 Mode1:  HIGH=%d LOW=%d",                            \
+                data->awake_ph1_high, data->awake_ph1_low);                     \
+        LOG_INF("  Phase 2 Mode3 idle:  HIGH=%d LOW=%d",                       \
+                data->awake_ph2_high, data->awake_ph2_low);                     \
+        LOG_INF("  Phase 3 Mode3 press: HIGH=%d LOW=%d",                       \
+                data->awake_ph3_high, data->awake_ph3_low);                     \
+        LOG_INF("  >>> SLEEP WAKE: %s",                                        \
+                wake_ok ? "OK" : "WILL FAIL");                                  \
+        LOG_INF("========================================");                    \
+    }                                                                           \
+                                                                                \
+    static void he_awake_test_work_handler_##n(struct k_work *work)             \
+        __attribute__((unused));                                                 \
+    static void he_awake_test_work_handler_##n(struct k_work *work)             \
+    {                                                                           \
+        ARG_UNUSED(work);                                                       \
+        he_awake_pin_test_##n();                                                \
+    }                                                                           \
+                                                                                \
+    static void he_awake_reprint_work_handler_##n(struct k_work *work)          \
+        __attribute__((unused));                                                 \
+    static void he_awake_reprint_work_handler_##n(struct k_work *work)          \
+    {                                                                           \
+        ARG_UNUSED(work);                                                       \
+        struct he_kscan_data_##n *data = &he_data_##n;                          \
+        if (!data->awake_test_done ||                                           \
+            data->awake_reprint_remaining <= 0) { return; }                     \
+        int rep_num = data->awake_reprint_total -                               \
+                      data->awake_reprint_remaining + 1;                        \
+        LOG_INF("(Reprint %d/%d - summary from earlier test)",                 \
+                rep_num, data->awake_reprint_total);                            \
+        he_awake_print_summary_##n();                                           \
+        data->awake_reprint_remaining--;                                        \
+        if (data->awake_reprint_remaining > 0) {                                \
+            k_work_schedule(&data->awake_reprint_work, K_SECONDS(30));          \
+        }                                                                       \
     }                                                                           \
     PM_DEVICE_DT_INST_DEFINE(n, he_kscan_pm_action_##n);                        \
                                                                                 \
